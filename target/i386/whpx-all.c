@@ -1553,6 +1553,22 @@ static int whpx_vcpu_run(CPUState *cpu)
                     rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
                     rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
                     break;
+                case 0x80000007:
+                    rax = vcpu->exit_ctx.CpuidAccess.DefaultResultRax;
+                    rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
+                    rcx = vcpu->exit_ctx.CpuidAccess.DefaultResultRcx;
+                    rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
+                    /*
+                     * KEMU: Expose invariant TSC (INVTSC) so the guest kernel
+                     * can use the TSC as a reliable clocksource.  Hyper-V masks
+                     * this CPUID bit for its guests even though the virtualized
+                     * TSC is stable in this local emulator setup (no live
+                     * migration).  Without it the guest falls back to the
+                     * emulated HPET, whose MMIO reads trap to the hypervisor
+                     * and make every clock_gettime very slow.
+                     */
+                    rdx |= CPUID_APM_INVTSC;
+                    break;
                 default:
                     rax = vcpu->exit_ctx.CpuidAccess.DefaultResultRax;
                     rcx = vcpu->exit_ctx.CpuidAccess.DefaultResultRcx;
@@ -2272,7 +2288,8 @@ static int whpx_accel_init(MachineState *ms)
         goto error;
     }
 
-    UINT32 cpuidExitList[] = {1, 7, 0xD, WHPX_CPUID_SIGNATURE, 0x80000001};
+    UINT32 cpuidExitList[] = {1, 7, 0xD, WHPX_CPUID_SIGNATURE, 0x80000001,
+                              0x80000007};
     hr = whp_dispatch.WHvSetPartitionProperty(
         whpx->partition,
         WHvPartitionPropertyCodeCpuidExitList,
