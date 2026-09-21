@@ -329,10 +329,7 @@ bool SharedFD::Pipe(SharedFD* fd0, SharedFD* fd1) {
 }
 
 SharedFD SharedFD::SocketLocalClient(int port) {
-    int fd = android::base::socketTcp6LoopbackClient(port);
-    if (fd == -1) {
-        fd = android::base::socketTcp4LoopbackClient(port);
-    }
+    int fd = android::base::socketTcp4LoopbackClient(port);
     if (fd == -1) {
         return SharedFD();
     }
@@ -354,10 +351,7 @@ SharedFD SharedFD::SocketLocalClient(const std::string& name,
         return SharedFD();
     }
     int port = std::stoi(name.substr(prefix.size()));
-    int fd = android::base::socketTcp6LoopbackClient(port);
-    if (fd == -1) {
-        fd = android::base::socketTcp4LoopbackClient(port);
-    }
+    int fd = android::base::socketTcp4LoopbackClient(port);
     if (fd == -1) {
         return SharedFD();
     }
@@ -366,18 +360,13 @@ SharedFD SharedFD::SocketLocalClient(const std::string& name,
 }
 
 SharedFD SharedFD::SocketLocalServer(int port) {
-    bool isIpv4 = false;
-    int fd = android::base::socketTcp6LoopbackServer(port);
-    if (fd == -1) {
-        fd = android::base::socketTcp4LoopbackServer(port);
-        isIpv4 = true;
-    }
+    int fd = android::base::socketTcp4LoopbackServer(port);
     if (fd == -1) {
         return SharedFD();
     }
     android::base::socketSetNoDelay(fd);
     auto sfd = SharedFD(std::shared_ptr<FileInstance>(new FileInstance(fd, 0)));
-    sfd.isIpv4_ = isIpv4;
+    sfd.isIpv4_ = true;
     return sfd;
 }
 
