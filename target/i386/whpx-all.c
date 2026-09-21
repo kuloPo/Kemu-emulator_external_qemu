@@ -38,6 +38,7 @@
 #endif
 #include <WinHvPlatform.h>
 #include <WinHvEmulation.h>
+#include <stdarg.h>
 
 #define WHPX_CPUID_SIGNATURE 0x40000000
 
@@ -99,33 +100,12 @@ static const WHV_REGISTER_NAME whpx_register_names[] = {
      * WHvX64RegisterDr7,
      */
 
-    /* X64 Floating Point and Vector Registers */
-    WHvX64RegisterXmm0,
-    WHvX64RegisterXmm1,
-    WHvX64RegisterXmm2,
-    WHvX64RegisterXmm3,
-    WHvX64RegisterXmm4,
-    WHvX64RegisterXmm5,
-    WHvX64RegisterXmm6,
-    WHvX64RegisterXmm7,
-    WHvX64RegisterXmm8,
-    WHvX64RegisterXmm9,
-    WHvX64RegisterXmm10,
-    WHvX64RegisterXmm11,
-    WHvX64RegisterXmm12,
-    WHvX64RegisterXmm13,
-    WHvX64RegisterXmm14,
-    WHvX64RegisterXmm15,
-    WHvX64RegisterFpMmx0,
-    WHvX64RegisterFpMmx1,
-    WHvX64RegisterFpMmx2,
-    WHvX64RegisterFpMmx3,
-    WHvX64RegisterFpMmx4,
-    WHvX64RegisterFpMmx5,
-    WHvX64RegisterFpMmx6,
-    WHvX64RegisterFpMmx7,
-    WHvX64RegisterFpControlStatus,
-    WHvX64RegisterXmmControlStatus,
+    /*
+     * KEMU: The X64 floating point and vector registers are not part of
+     * this array anymore.  With XSAVE enabled they are transferred through
+     * the WHPX XSAVE state API; otherwise the legacy FP register array
+     * (whpx_register_names_legacy_fp) is used.
+     */
 
     /* X64 MSRs */
     WHvX64RegisterTsc,
@@ -153,6 +133,40 @@ static const WHV_REGISTER_NAME whpx_register_names[] = {
      * WHvRegisterPendingEvent1
      * WHvX64RegisterDeliverabilityNotifications,
      */
+};
+
+/*
+ * KEMU: Legacy (non-XSAVE) floating point and vector register set, used
+ * when the guest has not enabled XSAVE (CR4.OSXSAVE clear).
+ */
+static const WHV_REGISTER_NAME whpx_register_names_legacy_fp[] = {
+    /* X64 Floating Point and Vector Registers (non-xsave) */
+    WHvX64RegisterXmm0,
+    WHvX64RegisterXmm1,
+    WHvX64RegisterXmm2,
+    WHvX64RegisterXmm3,
+    WHvX64RegisterXmm4,
+    WHvX64RegisterXmm5,
+    WHvX64RegisterXmm6,
+    WHvX64RegisterXmm7,
+    WHvX64RegisterXmm8,
+    WHvX64RegisterXmm9,
+    WHvX64RegisterXmm10,
+    WHvX64RegisterXmm11,
+    WHvX64RegisterXmm12,
+    WHvX64RegisterXmm13,
+    WHvX64RegisterXmm14,
+    WHvX64RegisterXmm15,
+    WHvX64RegisterFpMmx0,
+    WHvX64RegisterFpMmx1,
+    WHvX64RegisterFpMmx2,
+    WHvX64RegisterFpMmx3,
+    WHvX64RegisterFpMmx4,
+    WHvX64RegisterFpMmx5,
+    WHvX64RegisterFpMmx6,
+    WHvX64RegisterFpMmx7,
+    WHvX64RegisterFpControlStatus,
+    WHvX64RegisterXmmControlStatus,
 };
 
 struct whpx_register_set {
@@ -187,6 +201,41 @@ static bool whpx_has_xsave(void)
 static bool whpx_has_xsave_supervisor(void)
 {
     return whpx_xsave_cap.XsaveSupervisorSupport;
+}
+
+/*
+ * KEMU: Windows 10 (legacy) lacks the modern WHPX virtual processor state
+ * API (WHvGet/SetVirtualProcessorState).  On such hosts the XSAVE state is
+ * transferred through WHvGet/SetVirtualProcessorXsaveState instead.
+ */
+static bool is_modern_os = true;
+
+static bool whpx_is_legacy_os(void)
+{
+    return !is_modern_os;
+}
+
+static bool whpx_is_xsave_enabled(CPUState *cpu)
+{
+    CPUX86State *env = &X86_CPU(cpu)->env;
+    return env->cr[4] & CR4_OSXSAVE_MASK;
+}
+
+/*
+ * Size of the XSAVE area to use for the WHPX XSAVE state transfers.  The
+ * host CPUID leaf 0xD subleaf 0 ECX reports the size for the host's XCR0;
+ * the WHV_E_INSUFFICIENT_BUFFER retry in whpx_get_xsave_state() covers the
+ * case where the hypervisor image is larger (supervisor state).
+ */
+static size_t whpx_get_xsave_max_len(void)
+{
+    uint32_t eax, ebx, ecx, edx;
+
+    host_cpuid(0xD, 0, &eax, &ebx, &ecx, &edx);
+    if (ecx == 0 || ecx > 64 * 1024) {
+        return sizeof(X86XSaveArea);
+    }
+    return ecx;
 }
 
 /*
@@ -252,6 +301,16 @@ static void whpx_set_xcrs_and_xss(CPUState *cpu)
         return;
     }
 
+    /*
+     * KEMU: On Windows 10 (legacy) the XCR0/XSS register interface is not
+     * available (WHvSetVirtualProcessorRegisters fails with hr=80370309).
+     * XCR0/XSS are managed by the hypervisor together with the XSAVE state
+     * in that case, so skip the register access there.
+     */
+    if (whpx_is_legacy_os()) {
+        return;
+    }
+
     /* Only xcr0 is supported by the hypervisor currently */
     reg_val.Reg64 = env->xcr0;
     reg_name = WHvX64RegisterXCr0;
@@ -272,6 +331,116 @@ static void whpx_set_xcrs_and_xss(CPUState *cpu)
         whpx->partition, cpu->cpu_index, &reg_name, 1, &reg_val);
     if (FAILED(hr)) {
         error_report("WHPX: Failed to set register IA32_XSS, hr=%08lx", hr);
+    }
+}
+
+/*
+ * KEMU: Save the guest XSAVE state into the hypervisor using the WHPX
+ * XSAVE state API (Windows 10 legacy: WHvSetVirtualProcessorXsaveState;
+ * Windows 11: WHvSetVirtualProcessorState with XsaveState).
+ */
+static int whpx_set_xsave_state(const CPUState *cpu)
+{
+    struct whpx_state *whpx = &whpx_global;
+    X86CPU *x86cpu = X86_CPU(cpu);
+    CPUX86State *env = &x86cpu->env;
+    HRESULT hr;
+    void *xsavec_buf;
+    size_t page = qemu_real_host_page_size;
+    size_t xsavec_buf_len;
+
+    /* allocate and populate compacted buffer */
+    xsavec_buf_len = whpx_get_xsave_max_len();
+    xsavec_buf = qemu_memalign(page, xsavec_buf_len);
+
+    /* save registers to standard format buffer */
+    x86_cpu_xsave_all_areas(x86cpu, (X86XSaveArea *)env->xsave_buf);
+
+    /* store compacted version of xsave area in xsavec_buf */
+    compact_xsave_area(env, xsavec_buf, xsavec_buf_len);
+
+    if (!whpx_is_legacy_os()) {
+        hr = whp_dispatch.WHvSetVirtualProcessorState(
+            whpx->partition, cpu->cpu_index,
+            WHvVirtualProcessorStateTypeXsaveState,
+            xsavec_buf,
+            xsavec_buf_len);
+    } else {
+        hr = whp_dispatch.WHvSetVirtualProcessorXsaveState(
+            whpx->partition, cpu->cpu_index,
+            xsavec_buf,
+            xsavec_buf_len);
+    }
+
+    qemu_vfree(xsavec_buf);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to set xsave state, hr=%08lx", hr);
+        return -EIO;
+    }
+
+    return 0;
+}
+
+static void whpx_set_legacy_fp_registers(CPUState *cpu)
+{
+    struct whpx_state *whpx = &whpx_global;
+    X86CPU *x86_cpu = X86_CPU(cpu);
+    CPUX86State *env = &x86_cpu->env;
+    struct whpx_register_set vcxt;
+    HRESULT hr;
+    int idx = 0;
+    int i;
+    int idx_next;
+
+    assert(cpu_is_stopped(cpu) || qemu_cpu_is_self(cpu));
+
+    /* 16 XMM registers */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterXmm0);
+    idx_next = idx + 16;
+    for (i = 0; i < 16; i += 1, idx += 1) {
+        vcxt.values[idx].Reg128.Low64 = env->xmm_regs[i].ZMM_Q(0);
+        vcxt.values[idx].Reg128.High64 = env->xmm_regs[i].ZMM_Q(1);
+    }
+    idx = idx_next;
+
+    /* 8 FP registers */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterFpMmx0);
+    for (i = 0; i < 8; i += 1, idx += 1) {
+        vcxt.values[idx].Fp.AsUINT128.Low64 = env->fpregs[i].mmx.MMX_Q(0);
+        /* vcxt.values[idx].Fp.AsUINT128.High64 =
+               env->fpregs[i].mmx.MMX_Q(1);
+        */
+    }
+
+    /* FP control status register */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterFpControlStatus);
+    vcxt.values[idx].FpControlStatus.FpControl = env->fpuc;
+    vcxt.values[idx].FpControlStatus.FpStatus =
+        (env->fpus & ~0x3800) | (env->fpstt & 0x7) << 11;
+    vcxt.values[idx].FpControlStatus.FpTag = 0;
+    for (i = 0; i < 8; ++i) {
+        vcxt.values[idx].FpControlStatus.FpTag |= (!env->fptags[i]) << i;
+    }
+    vcxt.values[idx].FpControlStatus.Reserved = 0;
+    vcxt.values[idx].FpControlStatus.LastFpOp = env->fpop;
+    vcxt.values[idx].FpControlStatus.LastFpRip = env->fpip;
+    idx += 1;
+
+    /* XMM control status register */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterXmmControlStatus);
+    vcxt.values[idx].XmmControlStatus.LastFpRdp = 0;
+    vcxt.values[idx].XmmControlStatus.XmmStatusControl = env->mxcsr;
+    vcxt.values[idx].XmmControlStatus.XmmStatusControlMask = 0x0000ffff;
+    idx += 1;
+
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx->partition, cpu->cpu_index,
+        whpx_register_names_legacy_fp,
+        idx,
+        &vcxt.values[0]);
+
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to set legacy FP registers, hr=%08lx", hr);
     }
 }
 
@@ -353,44 +522,15 @@ static void whpx_set_registers(CPUState *cpu)
     /* Extended control registers */
     whpx_set_xcrs_and_xss(cpu);
 
-    /* 16 XMM registers */
-    assert(whpx_register_names[idx] == WHvX64RegisterXmm0);
-    idx_next = idx + 16;
-    for (i = 0; i < sizeof(env->xmm_regs) / sizeof(ZMMReg); i += 1, idx += 1) {
-        vcxt.values[idx].Reg128.Low64 = env->xmm_regs[i].ZMM_Q(0);
-        vcxt.values[idx].Reg128.High64 = env->xmm_regs[i].ZMM_Q(1);
+    /*
+     * KEMU: With XSAVE enabled the FP/vector state is transferred through
+     * the WHPX XSAVE state API; otherwise use the legacy FP register set.
+     */
+    if (whpx_is_xsave_enabled(cpu)) {
+        whpx_set_xsave_state(cpu);
+    } else {
+        whpx_set_legacy_fp_registers(cpu);
     }
-    idx = idx_next;
-
-    /* 8 FP registers */
-    assert(whpx_register_names[idx] == WHvX64RegisterFpMmx0);
-    for (i = 0; i < 8; i += 1, idx += 1) {
-        vcxt.values[idx].Fp.AsUINT128.Low64 = env->fpregs[i].mmx.MMX_Q(0);
-        /* vcxt.values[idx].Fp.AsUINT128.High64 =
-               env->fpregs[i].mmx.MMX_Q(1);
-        */
-    }
-
-    /* FP control status register */
-    assert(whpx_register_names[idx] == WHvX64RegisterFpControlStatus);
-    vcxt.values[idx].FpControlStatus.FpControl = env->fpuc;
-    vcxt.values[idx].FpControlStatus.FpStatus =
-        (env->fpus & ~0x3800) | (env->fpstt & 0x7) << 11;
-    vcxt.values[idx].FpControlStatus.FpTag = 0;
-    for (i = 0; i < 8; ++i) {
-        vcxt.values[idx].FpControlStatus.FpTag |= (!env->fptags[i]) << i;
-    }
-    vcxt.values[idx].FpControlStatus.Reserved = 0;
-    vcxt.values[idx].FpControlStatus.LastFpOp = env->fpop;
-    vcxt.values[idx].FpControlStatus.LastFpRip = env->fpip;
-    idx += 1;
-
-    /* XMM control status register */
-    assert(whpx_register_names[idx] == WHvX64RegisterXmmControlStatus);
-    vcxt.values[idx].XmmControlStatus.LastFpRdp = 0;
-    vcxt.values[idx].XmmControlStatus.XmmStatusControl = env->mxcsr;
-    vcxt.values[idx].XmmControlStatus.XmmStatusControlMask = 0x0000ffff;
-    idx += 1;
 
     /* MSRs */
     assert(whpx_register_names[idx] == WHvX64RegisterTsc);
@@ -455,6 +595,16 @@ static void whpx_get_xcrs_and_xss(CPUState *cpu)
         return;
     }
 
+    /*
+     * KEMU: On Windows 10 (legacy) the XCR0/XSS register interface is not
+     * available (WHvGetVirtualProcessorRegisters fails with hr=80370309).
+     * XCR0/XSS are managed by the hypervisor together with the XSAVE state
+     * in that case, so skip the register access there.
+     */
+    if (whpx_is_legacy_os()) {
+        return;
+    }
+
     /* Only xcr0 is supported by the hypervisor currently */
     reg_name = WHvX64RegisterXCr0;
     hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
@@ -478,6 +628,151 @@ static void whpx_get_xcrs_and_xss(CPUState *cpu)
         return;
     }
     env->xss = reg_val.Reg64;
+}
+
+/*
+ * KEMU: Load the guest XSAVE state from the hypervisor using the WHPX
+ * XSAVE state API (Windows 10 legacy: WHvGetVirtualProcessorXsaveState;
+ * Windows 11: WHvGetVirtualProcessorState with XsaveState).
+ */
+static HRESULT whpx_get_xsave_state_buffer(const CPUState *cpu, void *buf,
+                                           size_t buf_len,
+                                           UINT32 *bytes_written)
+{
+    struct whpx_state *whpx = &whpx_global;
+
+    if (!whpx_is_legacy_os()) {
+        return whp_dispatch.WHvGetVirtualProcessorState(
+            whpx->partition, cpu->cpu_index,
+            WHvVirtualProcessorStateTypeXsaveState,
+            buf,
+            buf_len, bytes_written);
+    } else {
+        return whp_dispatch.WHvGetVirtualProcessorXsaveState(
+            whpx->partition, cpu->cpu_index,
+            buf,
+            buf_len, bytes_written);
+    }
+}
+
+static int whpx_get_xsave_state(CPUState *cpu)
+{
+    struct whpx_state *whpx = &whpx_global;
+    X86CPU *x86cpu = X86_CPU(cpu);
+    CPUX86State *env = &x86cpu->env;
+    int ret;
+    HRESULT hr;
+    void *xsavec_buf;
+    const size_t page = qemu_real_host_page_size;
+    size_t xsavec_buf_len = whpx_get_xsave_max_len();
+    UINT32 bytes_written;
+
+    xsavec_buf = qemu_memalign(page, xsavec_buf_len);
+    memset(xsavec_buf, 0, xsavec_buf_len);
+
+    bytes_written = 0;
+    hr = whpx_get_xsave_state_buffer(cpu, xsavec_buf, xsavec_buf_len,
+                                     &bytes_written);
+
+    /*
+     * whpx_get_xsave_max_len() returns the size of the user state
+     * components enabled in XCR0.  The hypervisor returns an XSAVES image,
+     * which also contains the supervisor state, so the buffer may be too
+     * small; retry with the size reported by the hypervisor.
+     */
+    if (hr == WHV_E_INSUFFICIENT_BUFFER && bytes_written > xsavec_buf_len) {
+        qemu_vfree(xsavec_buf);
+        xsavec_buf_len = bytes_written;
+        xsavec_buf = qemu_memalign(page, xsavec_buf_len);
+        memset(xsavec_buf, 0, xsavec_buf_len);
+
+        bytes_written = 0;
+        hr = whpx_get_xsave_state_buffer(cpu, xsavec_buf, xsavec_buf_len,
+                                         &bytes_written);
+    }
+
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to get xsave state, hr=%08lx", hr);
+        qemu_vfree(xsavec_buf);
+        return -EIO;
+    }
+
+    if (bytes_written == 0) {
+        error_report("WHPX: Failed to get xsave state, no data returned");
+        qemu_vfree(xsavec_buf);
+        return -EIO;
+    }
+
+    ret = decompact_xsave_area(xsavec_buf, bytes_written, env);
+    qemu_vfree(xsavec_buf);
+    if (ret < 0) {
+        error_report("WHPX: Failed to decompact xsave area");
+        return ret;
+    }
+    x86_cpu_xrstor_all_areas(x86cpu, (X86XSaveArea *)env->xsave_buf);
+
+    return 0;
+}
+
+static void whpx_get_legacy_fp_registers(CPUState *cpu)
+{
+    struct whpx_state *whpx = &whpx_global;
+    X86CPU *x86_cpu = X86_CPU(cpu);
+    CPUX86State *env = &x86_cpu->env;
+    struct whpx_register_set vcxt;
+    HRESULT hr;
+    int i;
+    int idx;
+    int idx_next;
+
+    assert(cpu_is_stopped(cpu) || qemu_cpu_is_self(cpu));
+
+    hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+        whpx->partition, cpu->cpu_index,
+        whpx_register_names_legacy_fp,
+        RTL_NUMBER_OF(whpx_register_names_legacy_fp),
+        &vcxt.values[0]);
+
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to get legacy FP registers, hr=%08lx", hr);
+        return;
+    }
+
+    idx = 0;
+    /* 16 XMM registers */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterXmm0);
+    idx_next = idx + 16;
+    for (i = 0; i < 16; i += 1, idx += 1) {
+        env->xmm_regs[i].ZMM_Q(0) = vcxt.values[idx].Reg128.Low64;
+        env->xmm_regs[i].ZMM_Q(1) = vcxt.values[idx].Reg128.High64;
+    }
+    idx = idx_next;
+
+    /* 8 FP registers */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterFpMmx0);
+    for (i = 0; i < 8; i += 1, idx += 1) {
+        env->fpregs[i].mmx.MMX_Q(0) = vcxt.values[idx].Fp.AsUINT128.Low64;
+        /* env->fpregs[i].mmx.MMX_Q(1) =
+               vcxt.values[idx].Fp.AsUINT128.High64;
+        */
+    }
+
+    /* FP control status register */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterFpControlStatus);
+    env->fpuc = vcxt.values[idx].FpControlStatus.FpControl;
+    env->fpstt = (vcxt.values[idx].FpControlStatus.FpStatus >> 11) & 0x7;
+    env->fpus = vcxt.values[idx].FpControlStatus.FpStatus & ~0x3800;
+    for (i = 0; i < 8; ++i) {
+        env->fptags[i] = !((vcxt.values[idx].FpControlStatus.FpTag >> i) & 1);
+    }
+    env->fpop = vcxt.values[idx].FpControlStatus.LastFpOp;
+    env->fpip = vcxt.values[idx].FpControlStatus.LastFpRip;
+    idx += 1;
+
+    /* XMM control status register */
+    assert(whpx_register_names_legacy_fp[idx] == WHvX64RegisterXmmControlStatus);
+    env->mxcsr = vcxt.values[idx].XmmControlStatus.XmmStatusControl;
+    idx += 1;
 }
 
 static void whpx_get_registers(CPUState *cpu)
@@ -560,40 +855,15 @@ static void whpx_get_registers(CPUState *cpu)
     /* Extended control registers */
     whpx_get_xcrs_and_xss(cpu);
 
-    /* 16 XMM registers */
-    assert(whpx_register_names[idx] == WHvX64RegisterXmm0);
-    idx_next = idx + 16;
-    for (i = 0; i < sizeof(env->xmm_regs) / sizeof(ZMMReg); i += 1, idx += 1) {
-        env->xmm_regs[i].ZMM_Q(0) = vcxt.values[idx].Reg128.Low64;
-        env->xmm_regs[i].ZMM_Q(1) = vcxt.values[idx].Reg128.High64;
+    /*
+     * KEMU: With XSAVE enabled the FP/vector state is transferred through
+     * the WHPX XSAVE state API; otherwise use the legacy FP register set.
+     */
+    if (whpx_is_xsave_enabled(cpu)) {
+        whpx_get_xsave_state(cpu);
+    } else {
+        whpx_get_legacy_fp_registers(cpu);
     }
-    idx = idx_next;
-
-    /* 8 FP registers */
-    assert(whpx_register_names[idx] == WHvX64RegisterFpMmx0);
-    for (i = 0; i < 8; i += 1, idx += 1) {
-        env->fpregs[i].mmx.MMX_Q(0) = vcxt.values[idx].Fp.AsUINT128.Low64;
-        /* env->fpregs[i].mmx.MMX_Q(1) =
-               vcxt.values[idx].Fp.AsUINT128.High64;
-        */
-    }
-
-    /* FP control status register */
-    assert(whpx_register_names[idx] == WHvX64RegisterFpControlStatus);
-    env->fpuc = vcxt.values[idx].FpControlStatus.FpControl;
-    env->fpstt = (vcxt.values[idx].FpControlStatus.FpStatus >> 11) & 0x7;
-    env->fpus = vcxt.values[idx].FpControlStatus.FpStatus & ~0x3800;
-    for (i = 0; i < 8; ++i) {
-        env->fptags[i] = !((vcxt.values[idx].FpControlStatus.FpTag >> i) & 1);
-    }
-    env->fpop = vcxt.values[idx].FpControlStatus.LastFpOp;
-    env->fpip = vcxt.values[idx].FpControlStatus.LastFpRip;
-    idx += 1;
-
-    /* XMM control status register */
-    assert(whpx_register_names[idx] == WHvX64RegisterXmmControlStatus);
-    env->mxcsr = vcxt.values[idx].XmmControlStatus.XmmStatusControl;
-    idx += 1;
 
     /* MSRs */
     assert(whpx_register_names[idx] == WHvX64RegisterTsc);
@@ -740,6 +1010,25 @@ static const WHV_EMULATOR_CALLBACKS whpx_emu_callbacks = {
     .WHvEmulatorTranslateGvaPage = whpx_emu_translate_callback,
 };
 
+/*
+ * Kemu Stage-1 diagnostic: append fatal WHPX failures to a file so the
+ * reason survives stderr buffering/relay loss on abort.
+ */
+static void whpx_fatal_log(const char *fmt, ...)
+{
+    FILE *f = fopen("D:\\Kemu\\reports\\whpx-fatal.log", "a");
+    va_list ap;
+
+    if (!f) {
+        return;
+    }
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fflush(f);
+    fclose(f);
+}
+
 static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
 {
     HRESULT hr;
@@ -822,6 +1111,11 @@ static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
             ctx_copy.AccessInfo.AsUINT32,
             ctx_copy.Gpa,
             ctx_copy.Gva);
+
+        whpx_fatal_log("FATAL: MMIO emulation failed status=%08x"
+                       " instrlen=%u bytes='%s' gpa=%llx gva=%llx\n",
+                       emu_status.AsUINT32, ctx_copy.InstructionByteCount,
+                       instruction, ctx_copy.Gpa, ctx_copy.Gva);
 
         return -1;
     }
@@ -1079,6 +1373,9 @@ static int whpx_vcpu_run(CPUState *cpu)
             &vcpu->exit_ctx, sizeof(vcpu->exit_ctx));
 
         if (FAILED(hr)) {
+            whpx_fatal_log("FATAL: WHvRunVirtualProcessor FAILED hr=%08lx"
+                           " cpu=%d\n",
+                           (unsigned long)hr, cpu->cpu_index);
             error_report("WHPX: Failed to exec a virtual processor,"
                          " hr=%08lx", hr);
             ret = -1;
@@ -1162,6 +1459,15 @@ static int whpx_vcpu_run(CPUState *cpu)
                         vcpu->exit_ctx.CpuidAccess.DefaultResultRcx |
                         CPUID_EXT_HYPERVISOR;
 
+                    /*
+                     * Kemu Stage-1: only advertise XSAVE/AVX/FMA when the
+                     * WHPX partition can actually manage XSAVE state.
+                     */
+                    if (!whpx_has_xsave()) {
+                        rcx &= ~((UINT64)(CPUID_EXT_XSAVE | CPUID_EXT_AVX |
+                                          CPUID_EXT_FMA));
+                    }
+
                     rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
                     rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
                     break;
@@ -1173,6 +1479,62 @@ static int whpx_vcpu_run(CPUState *cpu)
                         ~CPUID_7_0_EBX_SMAP;
                     rcx = vcpu->exit_ctx.CpuidAccess.DefaultResultRcx;
                     rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
+
+                    /*
+                     * Kemu Stage-1: keep the guest on FP/SSE/YMM XSAVE
+                     * state. Mask AVX-512 unconditionally and AVX2 when
+                     * the partition cannot manage XSAVE state at all.
+                     */
+                    rbx &= ~((UINT64)(CPUID_7_0_EBX_AVX512F |
+                                      CPUID_7_0_EBX_AVX512DQ |
+                                      CPUID_7_0_EBX_AVX512IFMA |
+                                      CPUID_7_0_EBX_AVX512PF |
+                                      CPUID_7_0_EBX_AVX512ER |
+                                      CPUID_7_0_EBX_AVX512CD |
+                                      CPUID_7_0_EBX_AVX512BW |
+                                      CPUID_7_0_EBX_AVX512VL));
+                    rcx &= ~((UINT64)(CPUID_7_0_ECX_AVX512BMI |
+                                      CPUID_7_0_ECX_AVX512VNNI |
+                                      CPUID_7_0_ECX_AVX512BITALG |
+                                      CPUID_7_0_ECX_AVX512_VPOPCNTDQ));
+                    if (!whpx_has_xsave()) {
+                        rbx &= ~((UINT64)CPUID_7_0_EBX_AVX2);
+                    }
+                    break;
+                case 0xD:
+                    /*
+                     * Kemu Stage-1: expose only FP/SSE/YMM XSAVE state and
+                     * keep the XSAVE feature bits coherent with the
+                     * partition capabilities.
+                     */
+                    if (!whpx_has_xsave()) {
+                        rax = rbx = rcx = rdx = 0;
+                    } else {
+                        UINT64 supported =
+                            XSTATE_FP_MASK | XSTATE_SSE_MASK |
+                            XSTATE_YMM_MASK;
+                        UINT32 idx = vcpu->exit_ctx.CpuidAccess.Rcx;
+
+                        if (idx >= 63 ||
+                            (idx > 1 && !(supported & (1ULL << idx)))) {
+                            rax = rbx = rcx = rdx = 0;
+                        } else {
+                            rax = vcpu->exit_ctx.CpuidAccess.DefaultResultRax;
+                            rbx = vcpu->exit_ctx.CpuidAccess.DefaultResultRbx;
+                            rcx = vcpu->exit_ctx.CpuidAccess.DefaultResultRcx;
+                            rdx = vcpu->exit_ctx.CpuidAccess.DefaultResultRdx;
+                            if (idx == 0) {
+                                rax = (UINT32)supported;
+                            } else if (idx == 1) {
+                                rax &= (CPUID_XSAVE_XSAVEOPT |
+                                        CPUID_XSAVE_XGETBV1 |
+                                        CPUID_XSAVE_XSAVES);
+                                if (!whpx_has_xsave_supervisor()) {
+                                    rax &= ~((UINT32)CPUID_XSAVE_XSAVES);
+                                }
+                            }
+                        }
+                    }
                     break;
                 case WHPX_CPUID_SIGNATURE:
                     memcpy(signature, "WHPXWHPXWHPX", 12);
@@ -1364,6 +1726,27 @@ int whpx_init_vcpu(CPUState *cpu)
     cpu->vcpu_dirty = true;
     cpu->whpx_vcpu = vcpu;
 
+    /*
+     * KEMU: Initialize the XSAVE buffer page-aligned.  Hyper-V expects the
+     * compacted format bit in the XSAVE header; set it together with the
+     * initial XSTATE_BV.
+     */
+    {
+        X86CPU *x86_cpu = X86_CPU(cpu);
+        CPUX86State *env = &x86_cpu->env;
+        X86XSaveHeader *header;
+        size_t page_size = qemu_real_host_page_size;
+        size_t xsave_len = whpx_get_xsave_max_len();
+
+        env->xsave_buf = qemu_memalign(page_size, xsave_len);
+        env->xsave_buf_len = xsave_len;
+        memset(env->xsave_buf, 0, env->xsave_buf_len);
+
+        header = (X86XSaveHeader *)((char *)env->xsave_buf +
+                                    sizeof(X86LegacyXSaveArea));
+        header->xcomp_bv = header->xstate_bv | (1ULL << 63);
+    }
+
     return 0;
 }
 
@@ -1394,10 +1777,18 @@ void whpx_destroy_vcpu(CPUState *cpu)
 {
     struct whpx_state *whpx = &whpx_global;
     struct whpx_vcpu *vcpu = get_whpx_vcpu(cpu);
+    X86CPU *x86_cpu = X86_CPU(cpu);
+    CPUX86State *env = &x86_cpu->env;
 
     whp_dispatch.WHvDeleteVirtualProcessor(whpx->partition, cpu->cpu_index);
     whp_dispatch.WHvEmulatorDestroyEmulator(vcpu->emulator);
     g_free(cpu->whpx_vcpu);
+
+    /* KEMU: Release the XSAVE buffer. */
+    qemu_vfree(env->xsave_buf);
+    env->xsave_buf = NULL;
+    env->xsave_buf_len = 0;
+
     return;
 }
 
@@ -1740,6 +2131,16 @@ static void whpx_disable_xsave(struct whpx_state *whpx)
     WHV_PROCESSOR_XSAVE_FEATURES xsave_cap;
     HRESULT hr;
 
+    /*
+     * Kemu Stage-1 XSAVE probe: by default do NOT force-disable XSAVE on
+     * Windows 10. Set KEMU_WHPX_DISABLE_XSAVE=1 to restore the legacy
+     * workaround for an A/B comparison.
+     */
+    if (getenv("KEMU_WHPX_DISABLE_XSAVE") == NULL) {
+        fprintf(stderr, "WHPX: XSAVE force-disable SKIPPED (Stage-1 probe)\n");
+        return;
+    }
+
     typedef int(CALLBACK* PFN_RTLGETVERSION) (PRTL_OSVERSIONINFOW lpVersionInformation);
     PFN_RTLGETVERSION pRtlGetVersion;
     HMODULE hDll = LoadLibrary("Ntdll.dll");
@@ -1830,6 +2231,13 @@ static int whpx_accel_init(MachineState *ms)
         goto error;
     }
 
+    fprintf(stderr,
+            "WHPX: XsaveFeatures=0x%016llx query_hr=%08lx"
+            " (XsaveSupport=%d XsaveSupervisorSupport=%d)\n",
+            (unsigned long long)whpx_xsave_cap.AsUINT64, (unsigned long)hr,
+            (int)whpx_xsave_cap.XsaveSupport,
+            (int)whpx_xsave_cap.XsaveSupervisorSupport);
+
     /* Disable xsave until the WHPX xsave API's have not been plumbed in */
     whpx_disable_xsave(whpx);
 
@@ -1864,7 +2272,7 @@ static int whpx_accel_init(MachineState *ms)
         goto error;
     }
 
-    UINT32 cpuidExitList[] = {1, 7, WHPX_CPUID_SIGNATURE, 0x80000001};
+    UINT32 cpuidExitList[] = {1, 7, 0xD, WHPX_CPUID_SIGNATURE, 0x80000001};
     hr = whp_dispatch.WHvSetPartitionProperty(
         whpx->partition,
         WHvPartitionPropertyCodeCpuidExitList,
@@ -1957,6 +2365,24 @@ bool init_whp_dispatch() {
     }
     hLib = hWinHvPlatform;
     LIST_WINHVPLATFORM_FUNCTIONS(WHP_LOAD_FIELD)
+
+    /*
+     * KEMU: The XSAVE state APIs are optional and differ between Windows
+     * versions (Windows 10 legacy vs Windows 11 modern).  Load them
+     * without failing when absent.
+     */
+    #define WHP_LOAD_FIELD_OPTIONAL(return_type, function_name, signature) \
+        whp_dispatch.function_name = (function_name ## _t)GetProcAddress(hLib, #function_name); \
+
+    LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(WHP_LOAD_FIELD_OPTIONAL)
+
+    /*
+     * KEMU: The modern virtual processor state API only exists on
+     * Windows 11; its absence identifies a legacy (Windows 10) host, where
+     * WHvGet/SetVirtualProcessorXsaveState must be used instead.
+     */
+    is_modern_os = (whp_dispatch.WHvGetVirtualProcessorState != NULL &&
+                    whp_dispatch.WHvSetVirtualProcessorState != NULL);
 
     lib_name = "WinHvEmulation.dll";
     HMODULE hWinHvEmulation = LoadLibrary(lib_name);

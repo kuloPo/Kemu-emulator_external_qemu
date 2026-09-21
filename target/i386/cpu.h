@@ -1275,6 +1275,9 @@ typedef struct CPUX86State {
     int64_t user_tsc_khz; /* for sanity check only */
     void *kvm_xsave_buf;
     void *aehd_xsave_buf;
+    /* KEMU: generic XSAVE buffer (used by WHPX XSAVE state support) */
+    void *xsave_buf;
+    uint32_t xsave_buf_len;
 
     uint64_t mcg_cap;
     uint64_t mcg_ctl;
@@ -1839,6 +1842,8 @@ void x86_update_hflags(CPUX86State* env);
 
 void x86_cpu_xrstor_all_areas(X86CPU *cpu, const X86XSaveArea *buf);
 void x86_cpu_xsave_all_areas(X86CPU *cpu, X86XSaveArea *buf);
+int decompact_xsave_area(const void *buf, size_t buflen, CPUX86State *env);
+int compact_xsave_area(CPUX86State *env, void *buf, size_t buflen);
 void x86_update_hflags(CPUX86State* env);
 
 #endif /* I386_CPU_H */

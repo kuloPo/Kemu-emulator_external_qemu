@@ -17,6 +17,8 @@ typedef int WINBOOL;
 #include <WinHvEmulation.h>
 
 #define WHV_E_UNKNOWN_PROPERTY 0x80370302
+/* KEMU: WHV error used by the XSAVE state APIs when the buffer is too small */
+#define WHV_E_INSUFFICIENT_BUFFER 0x80370301
 
 #ifndef WHP_DISPATCH_H
 #define WHP_DISPATCH_H
@@ -40,6 +42,31 @@ typedef int WINBOOL;
   X(HRESULT, WHvSetVirtualProcessorRegisters, (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, const WHV_REGISTER_NAME* RegisterNames, UINT32 RegisterCount, const WHV_REGISTER_VALUE* RegisterValues)) \
 
 
+/*
+ * KEMU: Supplemental functions used by the XSAVE state support.
+ * Windows 10 (legacy) provides WHvGet/SetVirtualProcessorXsaveState;
+ * Windows 11 (modern) provides WHvGet/SetVirtualProcessorState with
+ * WHvVirtualProcessorStateTypeXsaveState.  They may be absent, so they
+ * are loaded optionally.
+ */
+#define LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(X) \
+  X(HRESULT, WHvGetVirtualProcessorXsaveState, \
+        (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
+        PVOID Buffer, \
+        UINT32 BufferSizeInBytes, UINT32 *BytesWritten)) \
+  X(HRESULT, WHvSetVirtualProcessorXsaveState, \
+        (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
+        PVOID Buffer, \
+        UINT32 BufferSizeInBytes)) \
+  X(HRESULT, WHvGetVirtualProcessorState, \
+        (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
+        WHV_VIRTUAL_PROCESSOR_STATE_TYPE StateType, PVOID Buffer, \
+        UINT32 BufferSizeInBytes, UINT32 *BytesWritten)) \
+  X(HRESULT, WHvSetVirtualProcessorState, \
+        (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
+        WHV_VIRTUAL_PROCESSOR_STATE_TYPE StateType, PVOID Buffer, \
+        UINT32 BufferSizeInBytes)) \
+
 #define LIST_WINHVEMULATION_FUNCTIONS(X) \
   X(HRESULT, WHvEmulatorCreateEmulator, (const WHV_EMULATOR_CALLBACKS* Callbacks, WHV_EMULATOR_HANDLE* Emulator)) \
   X(HRESULT, WHvEmulatorDestroyEmulator, (WHV_EMULATOR_HANDLE Emulator)) \
@@ -55,10 +82,12 @@ typedef int WINBOOL;
 
 // Define function typedef
 LIST_WINHVPLATFORM_FUNCTIONS(WHP_DEFINE_TYPE)
+LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(WHP_DEFINE_TYPE)
 LIST_WINHVEMULATION_FUNCTIONS(WHP_DEFINE_TYPE)
 
 struct WHPDispatch {
     LIST_WINHVPLATFORM_FUNCTIONS(WHP_DECLARE_MEMBER)
+    LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(WHP_DECLARE_MEMBER)
     LIST_WINHVEMULATION_FUNCTIONS(WHP_DECLARE_MEMBER)
 };
 
