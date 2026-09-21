@@ -108,7 +108,6 @@ static const WHV_REGISTER_NAME whpx_register_names[] = {
      */
 
     /* X64 MSRs */
-    WHvX64RegisterTsc,
     WHvX64RegisterEfer,
 #ifdef TARGET_X86_64
     WHvX64RegisterKernelGsBase,
@@ -444,6 +443,72 @@ static void whpx_set_legacy_fp_registers(CPUState *cpu)
     }
 }
 
+/*
+ * KEMU: The guest TSC is not synchronized across vCPUs by WHPX itself:
+ * WHvX64RegisterTsc holds the absolute guest TSC value, so writing it to
+ * different vCPUs at different wall-clock moments leaves a permanent offset
+ * between them.  The Linux guest detects that as a "TSC warp" and marks the
+ * TSC unstable, falling back to the slow emulated HPET clocksource.  To
+ * avoid that, the TSC is written only on reset/init (not on routine
+ * register syncs), with the partition time suspended so every vCPU
+ * observes the same base value.
+ */
+static int whpx_get_tsc(CPUState *cpu)
+{
+    struct whpx_state *whpx = &whpx_global;
+    struct CPUX86State *env = (CPUArchState *)(cpu->env_ptr);
+    WHV_REGISTER_NAME tsc_reg = WHvX64RegisterTsc;
+    WHV_REGISTER_VALUE tsc_val;
+    HRESULT hr;
+
+    hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+        whpx->partition, cpu->cpu_index, &tsc_reg, 1, &tsc_val);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to get TSC, hr=%08lx", hr);
+        return -1;
+    }
+
+    env->tsc = tsc_val.Reg64;
+    return 0;
+}
+
+static int whpx_set_tsc(CPUState *cpu)
+{
+    struct whpx_state *whpx = &whpx_global;
+    struct CPUX86State *env = (CPUArchState *)(cpu->env_ptr);
+    WHV_REGISTER_NAME tsc_reg = WHvX64RegisterTsc;
+    WHV_REGISTER_VALUE tsc_val;
+    HRESULT hr;
+
+    /*
+     * Suspend the partition time while writing the TSC so that all vCPUs
+     * observe the same base; the partition time resumes automatically once
+     * a vCPU runs again.
+     */
+    if (whp_dispatch.WHvSuspendPartitionTime) {
+        hr = whp_dispatch.WHvSuspendPartitionTime(whpx->partition);
+        if (FAILED(hr)) {
+            warn_report("WHPX: Failed to suspend partition time, hr=%08lx",
+                        hr);
+        }
+    }
+
+    tsc_val.Reg64 = env->tsc;
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx->partition, cpu->cpu_index, &tsc_reg, 1, &tsc_val);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to set TSC, hr=%08lx", hr);
+        return -1;
+    }
+
+    if (getenv("KEMU_WHPX_TSC_DEBUG")) {
+        fprintf(stderr, "WHPX: vCPU%u TSC <- %" PRIu64 "\n",
+                cpu->cpu_index, tsc_val.Reg64);
+    }
+
+    return 0;
+}
+
 static void whpx_set_registers(CPUState *cpu)
 {
     struct whpx_state *whpx = &whpx_global;
@@ -533,8 +598,6 @@ static void whpx_set_registers(CPUState *cpu)
     }
 
     /* MSRs */
-    assert(whpx_register_names[idx] == WHvX64RegisterTsc);
-    vcxt.values[idx++].Reg64 = env->tsc;
     assert(whpx_register_names[idx] == WHvX64RegisterEfer);
     vcxt.values[idx++].Reg64 = env->efer;
 #ifdef TARGET_X86_64
@@ -790,6 +853,16 @@ static void whpx_get_registers(CPUState *cpu)
 
     assert(cpu_is_stopped(cpu) || qemu_cpu_is_self(cpu));
 
+    /*
+     * KEMU: The TSC is no longer part of the routine register set; read it
+     * back lazily (for state inspection or VM state save), since it is only
+     * written on reset/init.
+     */
+    if (!env->tsc_valid) {
+        whpx_get_tsc(cpu);
+        env->tsc_valid = !runstate_is_running();
+    }
+
     hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
         whpx->partition, cpu->cpu_index,
         whpx_register_names,
@@ -866,8 +939,6 @@ static void whpx_get_registers(CPUState *cpu)
     }
 
     /* MSRs */
-    assert(whpx_register_names[idx] == WHvX64RegisterTsc);
-    env->tsc = vcxt.values[idx++].Reg64;
     assert(whpx_register_names[idx] == WHvX64RegisterEfer);
     env->efer = vcxt.values[idx++].Reg64;
 #ifdef TARGET_X86_64
@@ -1636,6 +1707,7 @@ static void do_whpx_cpu_synchronize_state(CPUState *cpu, run_on_cpu_data arg)
 static void do_whpx_cpu_synchronize_post_reset(CPUState *cpu,
                                                run_on_cpu_data arg)
 {
+    whpx_set_tsc(cpu);
     whpx_set_registers(cpu);
     cpu->vcpu_dirty = false;
 }
@@ -1643,6 +1715,7 @@ static void do_whpx_cpu_synchronize_post_reset(CPUState *cpu,
 static void do_whpx_cpu_synchronize_post_init(CPUState *cpu,
                                               run_on_cpu_data arg)
 {
+    whpx_set_tsc(cpu);
     whpx_set_registers(cpu);
     cpu->vcpu_dirty = false;
 }

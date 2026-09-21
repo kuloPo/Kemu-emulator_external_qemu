@@ -43,11 +43,10 @@ typedef int WINBOOL;
 
 
 /*
- * KEMU: Supplemental functions used by the XSAVE state support.
- * Windows 10 (legacy) provides WHvGet/SetVirtualProcessorXsaveState;
- * Windows 11 (modern) provides WHvGet/SetVirtualProcessorState with
- * WHvVirtualProcessorStateTypeXsaveState.  They may be absent, so they
- * are loaded optionally.
+ * KEMU: Supplemental functions.  The XSAVE state APIs differ between
+ * Windows versions (Windows 10 legacy vs Windows 11 modern) and the
+ * partition time API may be absent on older builds, so they are loaded
+ * optionally.
  */
 #define LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(X) \
   X(HRESULT, WHvGetVirtualProcessorXsaveState, \
@@ -66,6 +65,8 @@ typedef int WINBOOL;
         (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
         WHV_VIRTUAL_PROCESSOR_STATE_TYPE StateType, PVOID Buffer, \
         UINT32 BufferSizeInBytes)) \
+  X(HRESULT, WHvSuspendPartitionTime, \
+        (WHV_PARTITION_HANDLE Partition)) \
 
 #define LIST_WINHVEMULATION_FUNCTIONS(X) \
   X(HRESULT, WHvEmulatorCreateEmulator, (const WHV_EMULATOR_CALLBACKS* Callbacks, WHV_EMULATOR_HANDLE* Emulator)) \
