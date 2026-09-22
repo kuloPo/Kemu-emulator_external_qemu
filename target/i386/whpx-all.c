@@ -591,11 +591,16 @@ static void whpx_set_registers(CPUState *cpu)
      * KEMU: With XSAVE enabled the FP/vector state is transferred through
      * the WHPX XSAVE state API; otherwise use the legacy FP register set.
      */
+    /*
+     * KEMU: Hyper-V does not reliably provide the legacy FP/SSE area
+     * through the XSAVE state API, so the legacy registers have to be
+     * transferred as well (upstream 37ce6d8da75).  The legacy registers
+     * are written last so they win over the XSAVE image.
+     */
     if (whpx_is_xsave_enabled(cpu)) {
         whpx_set_xsave_state(cpu);
-    } else {
-        whpx_set_legacy_fp_registers(cpu);
     }
+    whpx_set_legacy_fp_registers(cpu);
 
     /* MSRs */
     assert(whpx_register_names[idx] == WHvX64RegisterEfer);
@@ -932,11 +937,16 @@ static void whpx_get_registers(CPUState *cpu)
      * KEMU: With XSAVE enabled the FP/vector state is transferred through
      * the WHPX XSAVE state API; otherwise use the legacy FP register set.
      */
+    /*
+     * KEMU: Fetch the legacy FP registers as well: the XSAVE image from
+     * Hyper-V cannot be relied on for the legacy FP/SSE area (upstream
+     * 37ce6d8da75).  The legacy registers are read last so they override
+     * whatever the XSAVE image contained.
+     */
     if (whpx_is_xsave_enabled(cpu)) {
         whpx_get_xsave_state(cpu);
-    } else {
-        whpx_get_legacy_fp_registers(cpu);
     }
+    whpx_get_legacy_fp_registers(cpu);
 
     /* MSRs */
     assert(whpx_register_names[idx] == WHvX64RegisterEfer);

@@ -144,8 +144,9 @@ int decompact_xsave_area(const void *buf, size_t buflen, CPUX86State *env)
     uint64_t *xcomp_bv;
     size_t i;
     uint32_t eax, ebx, ecx, edx;
-    uint32_t size, dst_off;
-    bool align64;
+    uint32_t size, dst_off, dst_size;
+    bool align64, supervisor;
+    bool dbg = getenv("KEMU_WHPX_XSAVE_DEBUG") != NULL;
     uint64_t guest_xcr0, *xstate_bv;
 
     compacted_xstate_bv = *(uint64_t *)(buf + XSAVE_XSTATE_BV_OFFSET);
@@ -153,6 +154,12 @@ int decompact_xsave_area(const void *buf, size_t buflen, CPUX86State *env)
 
     /* This function only handles compacted format (bit 63 set) */
     assert((compacted_xcomp_bv >> 63) & 1);
+
+    if (dbg) {
+        fprintf(stderr, "XSAVE decompact: xstate_bv=0x%016" PRIx64
+                " xcomp_bv=0x%016" PRIx64 " buflen=%zu\n",
+                compacted_xstate_bv, compacted_xcomp_bv, buflen);
+    }
 
     /* Low bits of XCOMP_BV describe which components are in the layout */
     compacted_layout_bv = compacted_xcomp_bv & ~(1ULL << 63);
@@ -179,8 +186,8 @@ int decompact_xsave_area(const void *buf, size_t buflen, CPUX86State *env)
      * Process each extended state component in the compacted layout.
      * Components 0 and 1 (FP and SSE) are in the legacy region, so start
      * at component 2.  For each component:
-     * - Calculate its offset in the compacted source (contiguous layout)
-     * - Get its fixed offset in the standard destination from CPUID
+     * - Walk the source with the host geometry (the hypervisor's image)
+     * - Map it to the guest model's standard-format slot when known
      * - Copy if the component has non-init state (bit set in XSTATE_BV)
      */
     xsave_offset = XSAVE_EXT_OFFSET;
@@ -189,65 +196,59 @@ int decompact_xsave_area(const void *buf, size_t buflen, CPUX86State *env)
             continue;
         }
 
-        /* Query guest CPUID for this component's size and standard offset */
-        cpu_x86_cpuid(env, 0xD, i, &eax, &ebx, &ecx, &edx);
-
+        /*
+         * The compacted image is produced by the hypervisor with its own
+         * (host) XSAVE capability, so the source layout must be walked with
+         * the host component geometry.
+         */
+        host_cpuid(0xD, i, &eax, &ebx, &ecx, &edx);
         size = eax;
-        dst_off = ebx;
-        align64 = (ecx & (1u << 1)) != 0;
+        align64 = (ecx & ESA_FEATURE_ALIGN64_MASK) != 0;
+        supervisor = (ecx & ESA_FEATURE_XSS_MASK) != 0;
 
-        /* Component is in the layout but unknown to the guest CPUID model */
+        if (dbg) {
+            fprintf(stderr, "  comp %zu: host size=%u off=%u ecx=0x%x\n",
+                    i, size, ebx, ecx);
+        }
+
         if (size == 0) {
-            /*
-             * The hypervisor might expose a component that has no
-             * representation in the guest CPUID model.  Query the host to
-             * retrieve its size so we can skip over it.
-             */
-            host_cpuid(0xD, i, &eax, &ebx, &ecx, &edx);
-            size = eax;
-            align64 = (ecx & (1u << 1)) != 0;
-            if (size == 0) {
-                error_report("xsave component %zu: size unknown to both "
-                             "guest and host CPUID", i);
-                return -EINVAL;
-            }
-
-            if (align64) {
-                xsave_offset = QEMU_ALIGN_UP(xsave_offset, 64);
-            }
-
-            if (xsave_offset + size > buflen) {
-                error_report("xsave component %zu overruns source buffer: "
-                             "offset=%zu size=%u buflen=%zu",
-                             i, xsave_offset, size, buflen);
-                return -E2BIG;
-            }
-
-            xsave_offset += size;
-            continue;
+            error_report("xsave component %zu: size unknown to host CPUID", i);
+            return -EINVAL;
         }
 
         if (align64) {
             xsave_offset = QEMU_ALIGN_UP(xsave_offset, 64);
         }
 
-        if ((xsave_offset + size) > buflen) {
+        if (xsave_offset + size > buflen) {
             error_report("xsave component %zu overruns source buffer: "
                          "offset=%zu size=%u buflen=%zu",
                          i, xsave_offset, size, buflen);
             return -E2BIG;
         }
 
-        if ((dst_off + size) > env->xsave_buf_len) {
-            error_report("xsave component %zu overruns destination buffer: "
-                         "offset=%u size=%u buflen=%zu",
-                         i, dst_off, size, (size_t)env->xsave_buf_len);
-            return -E2BIG;
-        }
+        /*
+         * KEMU: Copy the component into the guest's standard-format buffer
+         * when the guest CPU model knows it and it is not supervisor state.
+         * Supervisor components have no slot in the standard buffer (their
+         * CPUID offset is 0), and components unknown to the guest model
+         * (e.g. AVX-512 with the android64 model) have no destination at
+         * all; both are skipped while the source offset keeps advancing.
+         */
+        if (!supervisor &&
+            x86_cpu_get_xsave_component(env, i, &dst_size, &dst_off)) {
+            if ((dst_off + dst_size) > env->xsave_buf_len) {
+                error_report("xsave component %zu overruns destination "
+                             "buffer: offset=%u size=%u buflen=%zu",
+                             i, dst_off, dst_size,
+                             (size_t)env->xsave_buf_len);
+                return -E2BIG;
+            }
 
-        /* Copy components marked present in XSTATE_BV to guest model */
-        if (((compacted_xstate_bv >> i) & 1) != 0) {
-            memcpy(env->xsave_buf + dst_off, buf + xsave_offset, size);
+            if (((compacted_xstate_bv >> i) & 1) != 0) {
+                memcpy(env->xsave_buf + dst_off, buf + xsave_offset,
+                       MIN(size, dst_size));
+            }
         }
 
         xsave_offset += size;

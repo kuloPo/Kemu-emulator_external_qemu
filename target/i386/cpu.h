@@ -478,6 +478,19 @@ typedef enum X86Seg {
 #define XSTATE_Hi16_ZMM_MASK            (1ULL << XSTATE_Hi16_ZMM_BIT)
 #define XSTATE_PKRU_MASK                (1ULL << XSTATE_PKRU_BIT)
 
+/*
+ * KEMU: CPUID leaf 0xD subleaf ECX flags.  Bit 0 marks supervisor state
+ * (IA32_XSS) which has no slot in the standard-format XSAVE buffer, bit 1
+ * marks 64-byte alignment and bit 2 is the XFD flag.
+ */
+#define ESA_FEATURE_XSS_BIT             0
+#define ESA_FEATURE_ALIGN64_BIT         1
+#define ESA_FEATURE_XFD_BIT             2
+
+#define ESA_FEATURE_XSS_MASK            (1U << ESA_FEATURE_XSS_BIT)
+#define ESA_FEATURE_ALIGN64_MASK        (1U << ESA_FEATURE_ALIGN64_BIT)
+#define ESA_FEATURE_XFD_MASK            (1U << ESA_FEATURE_XFD_BIT)
+
 /* CPUID feature words */
 typedef enum FeatureWord {
     FEAT_1_EDX,         /* CPUID[1].EDX */
@@ -1555,6 +1568,9 @@ int cpu_x86_signal_handler(int host_signum, void *pinfo,
 void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
                    uint32_t *eax, uint32_t *ebx,
                    uint32_t *ecx, uint32_t *edx);
+/* KEMU: XSAVE component geometry from the guest CPU model (no cpuid clamp) */
+bool x86_cpu_get_xsave_component(CPUX86State *env, uint32_t index,
+                                 uint32_t *size, uint32_t *offset);
 void cpu_clear_apic_feature(CPUX86State *env);
 void host_cpuid(uint32_t function, uint32_t count,
                 uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);

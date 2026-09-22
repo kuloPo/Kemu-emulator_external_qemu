@@ -708,6 +708,30 @@ static inline uint64_t x86_cpu_xsave_components(X86CPU *cpu)
            cpu->env.features[FEAT_XSAVE_COMP_LO];
 }
 
+/*
+ * KEMU: Return an XSAVE component's standard-format geometry from the guest
+ * CPU model.  cpu_x86_cpuid() cannot be used for this: the emulator's CPU
+ * models (e.g. android64) advertise cpuid_level=4, so a leaf 0xD query gets
+ * clamped to leaf 4 and returns unrelated cache data.  Returns false when
+ * the component is unknown to the model or not enabled for the guest.
+ */
+bool x86_cpu_get_xsave_component(CPUX86State *env, uint32_t index,
+                                 uint32_t *size, uint32_t *offset)
+{
+    X86CPU *cpu = x86_env_get_cpu(env);
+
+    if (index >= ARRAY_SIZE(x86_ext_save_areas)) {
+        return false;
+    }
+    if (!((x86_cpu_xsave_components(cpu) >> index) & 1)) {
+        return false;
+    }
+
+    *size = x86_ext_save_areas[index].size;
+    *offset = x86_ext_save_areas[index].offset;
+    return true;
+}
+
 const char *get_register_name_32(unsigned int reg)
 {
     if (reg >= CPU_NB_REGS32) {
