@@ -1092,22 +1092,25 @@ static const WHV_EMULATOR_CALLBACKS whpx_emu_callbacks = {
 };
 
 /*
- * Kemu Stage-1 diagnostic: append fatal WHPX failures to a file so the
- * reason survives stderr buffering/relay loss on abort.
+ * Flush fatal WHPX diagnostics before abort. The launcher captures stderr;
+ * a separate diagnostic file can be selected with KEMU_WHPX_FATAL_LOG.
  */
 static void whpx_fatal_log(const char *fmt, ...)
 {
-    FILE *f = fopen("D:\\Kemu\\reports\\whpx-fatal.log", "a");
+    const char *path = getenv("KEMU_WHPX_FATAL_LOG");
+    FILE *f = path && *path ? fopen(path, "a") : NULL;
     va_list ap;
 
     if (!f) {
-        return;
+        f = stderr;
     }
     va_start(ap, fmt);
     vfprintf(f, fmt, ap);
     va_end(ap);
     fflush(f);
-    fclose(f);
+    if (f != stderr) {
+        fclose(f);
+    }
 }
 
 static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)

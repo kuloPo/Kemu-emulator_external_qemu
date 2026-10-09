@@ -172,3 +172,6 @@ android_add_test(
        ui-shared-stream)
 
 target_include_directories(ui-shared-stream_unittest PRIVATE src test)
+
+# Kemu chrome shares the emulator Qt runtime and UI thread.
+add_subdirectory(${ANDROID_QEMU2_TOP_DIR}/kemu-qt ${CMAKE_BINARY_DIR}/kemu-qt)

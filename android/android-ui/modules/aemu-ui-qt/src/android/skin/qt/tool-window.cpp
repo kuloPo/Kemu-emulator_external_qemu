@@ -11,6 +11,7 @@
  */
 
 #include "android/skin/qt/tool-window.h"
+#include "WindowChrome.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -849,6 +850,7 @@ void ToolWindow::hideEvent(QHideEvent*) {
 }
 
 void ToolWindow::show() {
+    if (kemu::enabled()) return;
     QFrame::show();
     setFixedSize(size());
 
@@ -1490,6 +1492,7 @@ void ToolWindow::forwardKeyToEmulator(uint32_t keycode, bool down) {
 }
 
 bool ToolWindow::handleQtKeyEvent(const QKeyEvent& event, QtKeyEventSource source) {
+    if (kemu::enabled()) return false;
     // See if this key is handled by the virtual scene control window first.
     if (mVirtualSceneControlWindow.hasInstance() &&
         mVirtualSceneControlWindow.get()->isActive()) {
@@ -1545,6 +1548,7 @@ void ToolWindow::closeExtendedWindow() {
 }
 
 void ToolWindow::dockMainWindow() {
+    if (kemu::enabled()) return;
     // Align horizontally relative to the main window's frame.
     // Align vertically to its contents.
     // If we're frameless, adjust for a transparent border

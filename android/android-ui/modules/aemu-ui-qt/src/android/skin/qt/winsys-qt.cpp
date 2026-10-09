@@ -856,6 +856,7 @@ extern void skin_winsys_start(bool no_window) {
         androidQtDefaultInit();
 
         EmulatorQtWindow::create();
+        EmulatorQtWindow::getInstance()->containerWindow()->initializeKemuUi();
 #ifdef __APPLE__
         // On OS X, Qt automatically generates an application menu with a "Quit"
         // item. For whatever reason, the auto-generated "quit" does not work,

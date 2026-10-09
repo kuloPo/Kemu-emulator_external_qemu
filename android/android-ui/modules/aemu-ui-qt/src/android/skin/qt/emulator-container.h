@@ -28,6 +28,8 @@
 #include "android/skin/qt/OverlayMessageCenter.h"
 #include "host-common/MultiDisplay.h"
 
+namespace kemu { class WindowChrome; }
+
 class EmulatorQtWindow;
 class QCloseEvent;
 class QFocusEvent;
@@ -60,6 +62,9 @@ public:
     void resizeEvent(QResizeEvent* event) override;
     void showEvent(QShowEvent* event) override;
 
+    void initializeKemuUi();
+    void kemuSurfaceChanged();
+    bool nativeEvent(const QByteArray& type, void* message, qintptr* result) override;
     void show();
     void showMinimized();
 
@@ -91,6 +96,8 @@ private slots:
     void slot_displayPowerModeChanged(uint32_t displayId, int mode);
 
 private:
+    friend class kemu::WindowChrome;
+    std::unique_ptr<kemu::WindowChrome> mKemuUi;
     void startResizeTimer();
     void adjustModalOverlayGeometry();
     void adjustVirtualSceneDialogGeometry();

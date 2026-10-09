@@ -10,6 +10,7 @@
 // GNU General Public License for more details.
 
 #include "android/skin/qt/emulator-container.h"
+#include "WindowChrome.h"
 
 #include <qframe.h>       // for QFrame::NoFrame
 #include <qglobal.h>      // for Q_ASSERT
@@ -178,7 +179,24 @@ EmulatorContainer::~EmulatorContainer() {
     mMessages->setParent(nullptr);
 }
 
+void EmulatorContainer::initializeKemuUi() {
+    if (!kemu::enabled() || mKemuUi) return;
+    mKemuUi = std::make_unique<kemu::WindowChrome>(this, mEmulatorWindow);
+    mEmulatorWindow->setDisablePinchToZoom(true);
+    show();
+}
+
+void EmulatorContainer::kemuSurfaceChanged() {
+    if (mKemuUi) mKemuUi->surfaceChanged();
+}
+
+bool EmulatorContainer::nativeEvent(const QByteArray& type, void* message, qintptr* result) {
+    if (mKemuUi && mKemuUi->nativeEvent(message, result)) return true;
+    return QScrollArea::nativeEvent(type, message, result);
+}
+
 bool EmulatorContainer::event(QEvent* e) {
+    if (kemu::enabled()) return QScrollArea::event(e);
     // Ignore MetaCall and UpdateRequest events, and don't snap in zoom mode.
     if (mEmulatorWindow->isInZoomMode() || e->type() == QEvent::MetaCall ||
         e->type() == QEvent::UpdateRequest) {
@@ -237,6 +255,11 @@ bool EmulatorContainer::event(QEvent* e) {
 }
 
 void EmulatorContainer::changeEvent(QEvent* event) {
+    if (kemu::enabled()) {
+        QScrollArea::changeEvent(event);
+        if (mKemuUi && event->type() == QEvent::WindowStateChange) mKemuUi->updateWindowState();
+        return;
+    }
     switch (event->type()) {
         case QEvent::WindowStateChange:
             // Strictly preventing the maximizing (called "zooming" on OS X) of
@@ -326,6 +349,7 @@ void EmulatorContainer::changeEvent(QEvent* event) {
 }
 
 void EmulatorContainer::closeEvent(QCloseEvent* event) {
+    if (mKemuUi) mKemuUi->beginClose();
     // make sure the toolWindow's close button is the only exit point
     // from qt: we could get closeEvent directly from host windowing
     // framework.
@@ -387,6 +411,12 @@ void EmulatorContainer::moveEvent(QMoveEvent* event) {
 }
 
 void EmulatorContainer::resizeEvent(QResizeEvent* event) {
+    if (kemu::enabled()) {
+        QScrollArea::resizeEvent(event);
+        mResizeTimer.stop();
+        if (mKemuUi) mKemuUi->layout();
+        return;
+    }
     QScrollArea::resizeEvent(event);
     mEmulatorWindow->simulateZoomedWindowResized(this->viewportSize());
     adjustModalOverlayGeometry();
@@ -409,6 +439,7 @@ void EmulatorContainer::resizeEvent(QResizeEvent* event) {
 }
 
 void EmulatorContainer::showEvent(QShowEvent* event) {
+    if (kemu::enabled()) { QScrollArea::showEvent(event); return; }
 // Disable the minimize and maximize buttons on OSX. See the comment in the
 // constructor for an explanation of why this is necessary.
 #ifdef __APPLE__
@@ -504,6 +535,7 @@ void EmulatorContainer::stopResizeTimer() {
 }
 
 QSize EmulatorContainer::viewportSize() const {
+    if (kemu::enabled()) return viewport()->size();
     QSize output = this->size();
 
     QScrollBar* vertical = this->verticalScrollBar();

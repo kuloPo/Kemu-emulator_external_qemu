@@ -1,0 +1,21 @@
+#include <windows.h>
+IDI_ICON1 ICON "kemu.ico"
+1 VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "FileDescription", "Kemu Android Emulator"
+   VALUE "ProductName", "Kemu"
+   VALUE "FileVersion", "0.1.0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END

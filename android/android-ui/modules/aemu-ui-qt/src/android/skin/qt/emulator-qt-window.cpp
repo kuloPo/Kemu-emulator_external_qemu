@@ -11,6 +11,7 @@
  */
 
 #include "android/skin/qt/emulator-qt-window.h"
+#include "WindowChrome.h"
 
 #include "aemu/base/Optional.h"
 #include "aemu/base/async/ThreadLooper.h"
@@ -1297,6 +1298,7 @@ bool EmulatorQtWindow::isReleaseMouseShortcut(SkinEventType type,
 }
 
 void EmulatorQtWindow::updateWindowTitle() {
+    if (kemu::enabled()) { mContainer.setWindowTitle("Kemu"); return; }
     if (mBaseWindowTitle.isEmpty()) {
         mBaseWindowTitle = mContainer.windowTitle();
     }
@@ -1592,6 +1594,7 @@ void EmulatorQtWindow::tabletEvent(QTabletEvent* event) {
 // are running frameless.
 
 void EmulatorQtWindow::maskWindowFrame() {
+    if (kemu::enabled()) { mContainer.clearMask(); return; }
     bool haveFrame = hasFrame();
     Qt::WindowFlags flags = mContainer.windowFlags();
 
@@ -2429,12 +2432,12 @@ void EmulatorQtWindow::slot_setDeviceGeometry(QRect rect,
 
 void EmulatorQtWindow::slot_setWindowPos(int x, int y, QSemaphore* semaphore) {
     QSemaphoreReleaser semReleaser(semaphore);
-    mContainer.move(x, y);
+    if (!kemu::enabled()) mContainer.move(x, y);
 }
 
 void EmulatorQtWindow::slot_setWindowSize(int w, int h, QSemaphore* semaphore) {
     QSemaphoreReleaser semReleaser(semaphore);
-    mContainer.resize(w, h);
+    if (!kemu::enabled()) mContainer.resize(w, h);
 }
 
 void EmulatorQtWindow::slot_paintWindowOverlayForResize(int mouseX,
@@ -2475,7 +2478,7 @@ void EmulatorQtWindow::slot_setWindowIcon(const unsigned char* data,
     QPixmap image;
     image.loadFromData(data, size);
     QIcon icon(image);
-    QApplication::setWindowIcon(icon);
+    if (!kemu::enabled()) QApplication::setWindowIcon(icon);
 }
 
 void EmulatorQtWindow::slot_setWindowTitle(QString title,
@@ -2536,13 +2539,14 @@ void EmulatorQtWindow::slot_showWindow(SkinSurface* surface,
     if (mInZoomMode && mNextIsZoom) {
         mContainer.stopResizeTimer();
         recenterFocusPoint();
-    } else if (!mNextIsZoom) {
+    } else if (!mNextIsZoom && !kemu::enabled()) {
         mContainer.resize(rect.size());
     }
     mNextIsZoom = false;
 
     maskWindowFrame();
     show();
+    mContainer.kemuSurfaceChanged();
 
     // Zooming forces the scroll bar to be visible for sizing purposes. They
     // should never be shown when not in zoom mode, and should only show when
@@ -2820,8 +2824,11 @@ void EmulatorQtWindow::doResize(const QSize& size, bool isKbdShortcut) {
         }
     }
 
-    double widthScale = (double)newSize.width() / (double)originalWidth;
-    double heightScale = (double)newSize.height() / (double)originalHeight;
+    // Kemu supplies the available viewport, not an already rounded skin size.
+    // Avoid rounding to integer logical pixels before the renderer scales again.
+    const QSize scaleBounds = kemu::enabled() && !isKbdShortcut ? size : newSize;
+    double widthScale = (double)scaleBounds.width() / (double)originalWidth;
+    double heightScale = (double)scaleBounds.height() / (double)originalHeight;
 
     // On HiDPI screen, newSize is in Qt logical pixel, whle originalWidth/
     // originalHeight are in actual pixel (logical pixel * pixel ratio).
@@ -3830,6 +3837,8 @@ void EmulatorQtWindow::trackpadAggregateTimeout() {
 }
 
 void EmulatorQtWindow::checkAdbVersionAndWarn() {
+    // Kemu owns a single startup warning with instructions for its layout.
+    if (kemu::enabled()) return;
     // Do not check for ADB in Fuchsia mode.
     if (getConsoleAgents()->settings->is_fuchsia())
         return;
