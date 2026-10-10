@@ -89,23 +89,11 @@ int launch() {
         path += (config.engine / sub).wstring() + L';';
     }
     setEnv(L"PATH", path + environment(L"PATH"));
-    // Optional platform-tools can be added manually when publishing. The UI
-    // checks availability once and warns without preventing the VM from booting.
-    const auto bundledRoot = kemu::fs::path(module).parent_path() / "runtime";
-    std::vector<kemu::fs::path> sdkRoots;
-    if (kemu::fs::is_regular_file(bundledRoot / "platform-tools/adb.exe")) sdkRoots.push_back(bundledRoot);
-    for (const auto* key : {L"ANDROID_HOME", L"ANDROID_SDK_ROOT"}) {
-        auto value = environment(key);
-        if (value.size() > 1 && value.front() == L'"' && value.back() == L'"') value = value.substr(1, value.size() - 2);
-        if (!value.empty()) sdkRoots.emplace_back(value);
-    }
-    sdkRoots.push_back(kemu::fs::path(environment(L"LOCALAPPDATA")) / "Android/Sdk");
-    kemu::fs::path sdk;
-    for (const auto& candidate : sdkRoots) {
-        std::error_code error;
-        if (kemu::fs::is_directory(candidate / "platform-tools", error)) { sdk = candidate; break; }
-    }
-    if (sdk.empty()) {
+    // ADB discovery checks PATH, then platform-tools beside this launcher.
+    // The SDK directory below is only needed by upstream AVD loading.
+    auto sdk = config.engine;
+    std::error_code sdkError;
+    if (!kemu::fs::is_directory(sdk / "platform-tools", sdkError)) {
         // Upstream AVD loading requires this directory even with explicit
         // image paths. A directory-only SDK lets the GUI warn about missing
         // ADB instead of exiting before a window can be shown.

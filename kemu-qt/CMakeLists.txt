@@ -15,8 +15,8 @@ if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
         TARGET_DIRECTORY aemu-ui-qt PROPERTIES COMPILE_DEFINITIONS KEMU_GUI_TESTS=1)
 endif()
 if(WINDOWS_MSVC_X86_64)
-    # Windows SDK import library; no third-party binary is redistributed.
-    android_license(TARGET dwmapi LIBNAME None SPDX None LICENSE None LOCAL None)
+    # Windows SDK import libraries; no third-party binary is redistributed.
+    android_license(TARGET dwmapi user32 ws2_32 LIBNAME None SPDX None LICENSE None LOCAL None)
     target_link_libraries(aemu-ui-qt PRIVATE dwmapi)
     add_executable(Kemu WIN32 launcher/Main.cpp launcher/RuntimeConfig.cpp resources/kemu.rc)
     target_compile_features(Kemu PRIVATE cxx_std_17)
@@ -24,6 +24,10 @@ if(WINDOWS_MSVC_X86_64)
     target_include_directories(Kemu PRIVATE resources)
     target_link_libraries(Kemu PRIVATE user32 ws2_32)
     set_target_properties(Kemu PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+    android_license(TARGET Kemu LIBNAME Kemu URL None SPDX GPL-2.0-only LICENSE None
+        LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
+    # Use the same install pipeline and destination as emulator.exe.
+    android_install_exe(Kemu .)
     add_executable(kemu-config-tests tests/ConfigTests.cpp launcher/RuntimeConfig.cpp)
     target_compile_features(kemu-config-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-config-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

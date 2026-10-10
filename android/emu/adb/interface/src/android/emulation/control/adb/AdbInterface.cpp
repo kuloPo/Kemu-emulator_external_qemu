@@ -395,6 +395,20 @@ static Optional<std::string> platformPath(std::string_view root) {
 }
 
 std::vector<std::string> AdbLocatorImpl::availableAdb() {
+    auto* system = System::get();
+    if (system->envGet("KEMU_UI") == "1") {
+        // Return only the first usable candidate so daemon/version selection
+        // cannot override Kemu's PATH-before-bundled lookup order.
+        auto adb = system->which(PathUtils::toExecutableName("adb"));
+        if (adb && extractProtocolVersion(*adb)) {
+            return {*adb};
+        }
+        adb = platformPath(system->getLauncherDirectory());
+        if (adb && extractProtocolVersion(*adb)) {
+            return {*adb};
+        }
+        return {};
+    }
     std::vector<std::string> available = {};
     // First try finding ADB by the environment variable.
     auto adb = platformPath(android::ConfigDirs::getSdkRootDirectoryByEnv());

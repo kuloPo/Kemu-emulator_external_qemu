@@ -26,31 +26,17 @@ std::wstring quoteArgument(const std::wstring& value) {
 
 RuntimeConfig RuntimeConfig::discover(const fs::path& applicationDir, const fs::path& localAppData) {
     RuntimeConfig c;
-    if (fs::exists(applicationDir / "runtime/emulator/qemu/windows-x86_64/qemu-system-x86_64.exe")) {
-        c.engine = applicationDir / "runtime/emulator";
-        c.images = applicationDir / "images/emu64x";
-        c.avdRoot = localAppData / "Kemu/Kemu/avd";
-        c.logs = localAppData / "Kemu/Kemu/logs";
-    } else {
-        auto dir = applicationDir;
-        for (int i = 0; i < 12; ++i) {
-            if (fs::exists(dir / "guest-images/emu64x/system.img")) break;
-            if (dir == dir.parent_path()) throw std::runtime_error("Cannot locate Kemu guest images");
-            dir = dir.parent_path();
-        }
-        c.engine = dir / "host-build/out/emulator-37.2.10-vs2026/distribution/emulator";
-        c.images = dir / "guest-images/emu64x";
-        c.avdRoot = dir / "avd";
-        c.logs = dir / "logs";
-    }
+    // The engine and its libraries are installed alongside Kemu.exe.
+    c.engine = applicationDir;
+    c.images = applicationDir / "system-img";
+    c.avdRoot = localAppData / "Kemu/Kemu/avd";
+    c.logs = localAppData / "Kemu/Kemu/logs";
     return c;
 }
 
 void RuntimeConfig::validate() const {
-    for (const auto& file : {engine / "qemu/windows-x86_64/qemu-system-x86_64.exe",
-                             engine / "kemu-native-ui-v1.txt"}) {
-        if (!fs::is_regular_file(file)) throw std::runtime_error("Missing Kemu runtime: " + utf8(file.wstring()));
-    }
+    const auto executable = engine / "qemu/windows-x86_64/qemu-system-x86_64.exe";
+    if (!fs::is_regular_file(executable)) throw std::runtime_error("Missing Kemu runtime: " + utf8(executable.wstring()));
     for (const auto* name : {"system.img", "vendor.img", "ramdisk.img", "kernel-ranchu", "userdata.img"}) {
         if (!fs::is_regular_file(images / name)) throw std::runtime_error("Missing Android image: " + utf8((images / name).wstring()));
     }

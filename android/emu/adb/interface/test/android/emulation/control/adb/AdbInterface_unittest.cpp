@@ -71,7 +71,7 @@ public:
             System::Duration timeoutMs = kInfinite,
             System::ProcessExitCode* outExitCode = nullptr) override {
         mLastCommand = commandLine;
-        if (!mSuccess)
+        if (!mSuccess || (!commandLine.empty() && commandLine.front() == mRejectedExecutable))
             return {};
 
         return Optional(std::string("Android Debug Bridge version 2.3.41"));
@@ -89,6 +89,7 @@ public:
     }
 
     std::vector<std::string> mLastCommand;
+    std::string mRejectedExecutable;
 
 private:
     bool mSuccess;
@@ -187,6 +188,63 @@ TEST_F(AdbInterfaceTest, findAdbOnPath) {
                        .setAdbDaemon(new FakeAdbDaemon())
                        .build();
     EXPECT_EQ(expectedAdbPath, adb->detectedAdbPath());
+}
+
+TEST_F(AdbInterfaceTest, kemuAdbLookupOrder) {
+    struct Scenario {
+        const char* name;
+        bool pathPresent;
+        bool pathUsable;
+        bool bundledPresent;
+        bool bundledUsable;
+    };
+    for (const auto& scenario : {
+            Scenario{"PATH wins over bundled ADB", true, true, true, true},
+            Scenario{"PATH works without bundled ADB", true, true, false, false},
+            Scenario{"missing PATH falls back to bundled ADB", false, false, true, true},
+            Scenario{"broken PATH ADB falls back to bundled ADB", true, false, true, true},
+            Scenario{"missing ADB does not fall back to SDK", false, false, false, false},
+            Scenario{"broken bundled ADB is rejected", false, false, true, false}}) {
+        SCOPED_TRACE(scenario.name);
+        AdbTestSystem system;
+        auto* dir = system.getTempRoot();
+        const auto executable = PathUtils::toExecutableName("adb");
+        ASSERT_TRUE(dir->makeSubDir("release"));
+        ASSERT_TRUE(dir->makeSubDir("release/platform-tools"));
+        const auto launcher = PathUtils::join(dir->path(), "release");
+        const auto bundled = PathUtils::join(launcher, "platform-tools", executable);
+        if (scenario.bundledPresent) {
+            ASSERT_TRUE(dir->makeSubFile(
+                    PathUtils::join("release", "platform-tools", executable).c_str()));
+        }
+        ASSERT_TRUE(dir->makeSubDir("path-bin"));
+        const auto pathAdb = PathUtils::join(dir->path(), "path-bin", executable);
+        if (scenario.pathPresent) {
+            ASSERT_TRUE(dir->makeSubFile(PathUtils::join("path-bin", executable).c_str()));
+            system.setWhich(pathAdb);
+        } else {
+            system.setWhich({});
+        }
+        if (scenario.pathPresent && !scenario.pathUsable) {
+            system.mRejectedExecutable = pathAdb;
+        } else if (scenario.bundledPresent && !scenario.bundledUsable) {
+            system.mRejectedExecutable = bundled;
+        }
+        // A valid SDK and an ancestor SDK must not become extra fallbacks.
+        ASSERT_TRUE(dir->makeSubDir("platform-tools"));
+        ASSERT_TRUE(dir->makeSubFile(PathUtils::join("platform-tools", executable).c_str()));
+        system.envSet("ANDROID_HOME", dir->path());
+        system.envSet("ANDROID_SDK_ROOT", dir->path());
+        system.envSet("KEMU_UI", "1");
+        system.setLauncherDirectory(launcher);
+        auto adb = AdbInterface::Builder()
+                           .setLooper(mLooper)
+                           .setAdbDaemon(new FakeAdbDaemon())
+                           .build();
+        const auto expected = scenario.pathUsable ? pathAdb
+                : scenario.bundledUsable ? bundled : std::string();
+        EXPECT_EQ(expected, adb->adbPath());
+    }
 }
 
 TEST_F(AdbInterfaceTest, staleAdbVersion) {

@@ -275,8 +275,8 @@ void WindowChrome::checkAdb() {
     warning->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
     warning->setInformativeText(QStringLiteral(
         "APK 安装、文件传输等功能将不可用，模拟器仍可继续运行。\n\n"
-        "请将 adb.exe 及配套 DLL 放入 Kemu.exe 同级目录下的 runtime/platform-tools，"
-        "或配置本机 Android SDK / PATH，然后重新启动 Kemu。"));
+        "请将 ADB 所在目录加入 PATH，或将 adb.exe 及配套 DLL 放入 Kemu.exe 同级目录下的 platform-tools，"
+        "然后重新启动 Kemu。"));
     warning->button(QMessageBox::Ok)->setText(QStringLiteral("继续启动"));
     warning->open();
 }

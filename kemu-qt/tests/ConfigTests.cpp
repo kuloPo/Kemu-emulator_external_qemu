@@ -11,12 +11,64 @@ static std::string read(const kemu::fs::path& file) {
 static void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
+
+static void checkEngineDiscovery(const kemu::fs::path& temporary) {
+    // Literal Unicode verifies paths that cannot be represented as ASCII.
+    const auto project = temporary / L"工程";
+    const auto build = project / "host-build/out/custom build";
+    kemu::fs::create_directories(build);
+    kemu::fs::create_directories(project / "guest-images/emu64x");
+    std::ofstream(project / "guest-images/emu64x/system.img") << "image fixture";
+    const auto development = kemu::RuntimeConfig::discover(build, temporary / "local");
+    require(development.engine == build, "engine must use the launcher directory, regardless of build name");
+    require(development.images == build / "system-img", "images must not fall back to the project directory");
+    require(development.avdRoot == temporary / "local/Kemu/Kemu/avd", "AVD must stay in local app data");
+
+    const auto release = project / "custom release";
+    // Keep old layouts populated to detect accidental fallback when an image is missing.
+    kemu::fs::create_directories(release / "images/emu64x");
+    kemu::fs::create_directories(release / "system-img");
+    for (const auto* name : {"system.img", "vendor.img", "ramdisk.img", "kernel-ranchu", "userdata.img"})
+        std::ofstream(release / "images/emu64x" / name) << "image fixture";
+    for (const auto* name : {"system.img", "ramdisk.img", "kernel-ranchu", "userdata.img"})
+        std::ofstream(release / "system-img" / name) << "image fixture";
+    // A leftover legacy runtime must not override the fixed relative path.
+    const auto legacy = release / "runtime/emulator/qemu/windows-x86_64";
+    kemu::fs::create_directories(legacy);
+    std::ofstream(legacy / "qemu-system-x86_64.exe") << "legacy engine fixture";
+    const auto installed = kemu::RuntimeConfig::discover(release, temporary / "local");
+    require(installed.engine == release, "installed engine must use the launcher directory");
+    require(installed.images == release / "system-img", "images must be in system-img beside the launcher");
+    bool missingEngine = false;
+    try { installed.validate(); } catch (const std::runtime_error& error) {
+        missingEngine = std::string(error.what()).find(kemu::utf8(
+            (release / "qemu/windows-x86_64/qemu-system-x86_64.exe").wstring())) != std::string::npos;
+    }
+    require(missingEngine, "missing adjacent engine must be reported instead of using a legacy runtime");
+    kemu::fs::create_directories(release / "qemu/windows-x86_64");
+    std::ofstream(release / "qemu/windows-x86_64/qemu-system-x86_64.exe") << "engine fixture";
+    bool missingImage = false;
+    try { installed.validate(); } catch (const std::runtime_error& error) {
+        missingImage = std::string(error.what()).find(kemu::utf8(
+            (release / "system-img" / "vendor.img").wstring())) != std::string::npos;
+    }
+    require(missingImage, "missing image must be reported instead of using old image layouts");
+    std::ofstream(release / "system-img/vendor.img") << "image fixture";
+    // A complete runtime must validate without any external build-script marker.
+    installed.validate();
+    const auto arguments = installed.arguments();
+    require(arguments.size() > 3 && arguments[2] == L"-sysdir" &&
+            arguments[3] == (release / "system-img").wstring(), "engine must receive the system-img directory");
+}
+
 int main() {
     const auto temporary = kemu::fs::temp_directory_path() / (L"kemu-config-test-" + std::to_wstring(GetCurrentProcessId()));
     try {
+        checkEngineDiscovery(temporary);
         kemu::RuntimeConfig config;
-        config.avdRoot = temporary / L"含 空格/avd";
-        config.images = temporary / L"新镜像 images";
+        // Exercise Unicode and spaces in both configuration and image paths.
+        config.avdRoot = temporary / L"中文 path/avd";
+        config.images = temporary / L"中文 images";
         config.logs = temporary / "logs";
         const auto avd = config.avdRoot / "kemu.avd";
         kemu::fs::create_directories(avd);
@@ -50,7 +102,7 @@ int main() {
         require(resolved.parent_path() == kemu::fs::canonical(kemu::fs::temp_directory_path()) &&
                 resolved.filename() == temporary.filename(), "unexpected cleanup path");
         kemu::fs::remove_all(resolved);
-        std::cout << "PASS: preserved userdata, settings, Unicode paths, idempotence, atomic replacement and argument quoting\n";
+        std::cout << "PASS: launcher-relative engine and system-img discovery, missing file detection, preserved userdata, settings, Unicode paths, idempotence, atomic replacement and argument quoting\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << " (fixtures retained at " << temporary << ")\n";
