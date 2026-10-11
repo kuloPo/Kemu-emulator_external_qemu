@@ -85,6 +85,9 @@ typedef struct PCITestDevState {
     MemoryRegion portio;
     IOTest *tests;
     int current;
+    /* Optional deterministic MMIO storage for CPU instruction-emulation tests. */
+    bool membar_scratch;
+    uint8_t scratch[8192];
 } PCITestDevState;
 
 #define TYPE_PCI_TEST_DEV "pci-testdev"
@@ -130,6 +133,10 @@ static void pci_testdev_stop(IOTest *test)
 static void
 pci_testdev_reset(PCITestDevState *d)
 {
+    if (d->membar_scratch) {
+        memset(d->scratch, 0, sizeof(d->scratch));
+        return;
+    }
     if (d->current == -1) {
         return;
     }
@@ -234,6 +241,36 @@ static const MemoryRegionOps pci_testdev_pio_ops = {
     },
 };
 
+static uint64_t pci_testdev_scratch_read(void *opaque, hwaddr addr, unsigned size)
+{
+    PCITestDevState *d = opaque;
+    uint64_t value = 0;
+    unsigned i;
+    for (i = 0; i < size; ++i) { value |= (uint64_t)d->scratch[addr + i] << (i * 8); }
+    return value;
+}
+
+static void pci_testdev_scratch_write(void *opaque, hwaddr addr, uint64_t value,
+                                    unsigned size)
+{
+    PCITestDevState *d = opaque;
+    unsigned i;
+    for (i = 0; i < size; ++i) { d->scratch[addr + i] = value >> (i * 8); }
+}
+
+static const MemoryRegionOps pci_testdev_scratch_ops = {
+    .read = pci_testdev_scratch_read,
+    .write = pci_testdev_scratch_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+    .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
+};
+
+static Property pci_testdev_properties[] = {
+    DEFINE_PROP_BOOL("membar-scratch", PCITestDevState, membar_scratch, false),
+    DEFINE_PROP_END_OF_LIST(),
+};
+
 static void pci_testdev_realize(PCIDevice *pci_dev, Error **errp)
 {
     PCITestDevState *d = PCI_TEST_DEV(pci_dev);
@@ -245,6 +282,13 @@ static void pci_testdev_realize(PCIDevice *pci_dev, Error **errp)
     pci_conf = pci_dev->config;
 
     pci_conf[PCI_INTERRUPT_PIN] = 0; /* no interrupt pin */
+
+    if (d->membar_scratch) {
+        memory_region_init_io(&d->mmio, OBJECT(d), &pci_testdev_scratch_ops, d,
+                              "pci-testdev-scratch", sizeof(d->scratch));
+        pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->mmio);
+        return;
+    }
 
     memory_region_init_io(&d->mmio, OBJECT(d), &pci_testdev_mmio_ops, d,
                           "pci-testdev-mmio", IOTEST_MEMSIZE * 2);
@@ -290,6 +334,8 @@ pci_testdev_uninit(PCIDevice *dev)
     PCITestDevState *d = PCI_TEST_DEV(dev);
     int i;
 
+    if (d->membar_scratch) { return; }
+
     pci_testdev_reset(d);
     for (i = 0; i < IOTEST_MAX; ++i) {
         if (d->tests[i].hasnotifier) {
@@ -320,6 +366,7 @@ static void pci_testdev_class_init(ObjectClass *klass, void *data)
     dc->desc = "PCI Test Device";
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->reset = qdev_pci_testdev_reset;
+    dc->props = pci_testdev_properties;
 }
 
 static const TypeInfo pci_testdev_info = {

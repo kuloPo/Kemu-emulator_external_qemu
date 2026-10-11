@@ -39,6 +39,7 @@
 #include <WinHvPlatform.h>
 #include <WinHvEmulation.h>
 #include <stdarg.h>
+#include "whpx-simd.h"
 
 #define WHPX_CPUID_SIGNATURE 0x40000000
 
@@ -179,6 +180,7 @@ struct whpx_vcpu {
     uint64_t tpr;
     uint64_t apic_base;
     bool interruption_pending;
+    uint32_t simd_logged;
 
     /* Must be the last field as it may have a tail */
     WHV_RUN_VP_EXIT_CONTEXT exit_ctx;
@@ -1113,6 +1115,275 @@ static void whpx_fatal_log(const char *fmt, ...)
     }
 }
 
+/* Return 1 after queuing a guest fault, -1 on a host API failure. */
+static int whpx_simd_fault(CPUState *cpu, unsigned vector, uint32_t code,
+                           uint64_t address)
+{
+    WHV_REGISTER_NAME names[] = {WHvRegisterPendingEvent, WHvX64RegisterCr2};
+    WHV_REGISTER_VALUE values[2] = {0};
+    WHV_X64_PENDING_EXCEPTION_EVENT event = {0};
+    HRESULT hr;
+
+    event.EventPending = 1;
+    event.EventType = WHvX64PendingEventException;
+    event.Vector = vector;
+    event.DeliverErrorCode = vector == 13 || vector == 14;
+    event.ErrorCode = code;
+    event.ExceptionParameter = address;
+    values[0].Reg128 = event.AsUINT128;
+    values[1].Reg64 = address;
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, names, vector == 14 ? 2 : 1,
+        values);
+    return FAILED(hr) ? -1 : 1;
+}
+
+/* Translate every page separately, including permissions and accessed/dirty
+ * bits. GPA translation failures are never silently treated as guest RAM. */
+static int whpx_simd_translate(CPUState *cpu, uint64_t gva, bool store,
+                               bool execute, uint64_t *gpa)
+{
+    WHV_TRANSLATE_GVA_RESULT result;
+    WHV_TRANSLATE_GVA_FLAGS flags = WHvTranslateGvaFlagSetPageTableBits;
+    uint32_t code = store ? 2 : 0;
+    HRESULT hr;
+
+    flags |= execute ? WHvTranslateGvaFlagValidateExecute
+             : store ? WHvTranslateGvaFlagValidateWrite
+                     : WHvTranslateGvaFlagValidateRead;
+    hr = whp_dispatch.WHvTranslateGva(whpx_global.partition, cpu->cpu_index,
+                                      gva, flags, &result, gpa);
+    if (FAILED(hr)) {
+        return -1;
+    }
+    if (result.ResultCode == WHvTranslateGvaResultSuccess) {
+        return 0;
+    }
+    if (result.ResultCode != WHvTranslateGvaResultPageNotPresent &&
+        result.ResultCode != WHvTranslateGvaResultPrivilegeViolation &&
+        result.ResultCode != WHvTranslateGvaResultInvalidPageTableFlags) {
+        error_report("WHPX: SIMD GVA translation failed: code=%u gva=%llx",
+                     result.ResultCode, (unsigned long long)gva);
+        return -1;
+    }
+    if (result.ResultCode != WHvTranslateGvaResultPageNotPresent) {
+        code |= 1;
+    }
+    if (result.ResultCode == WHvTranslateGvaResultInvalidPageTableFlags) {
+        code |= 8;
+    }
+    if (get_whpx_vcpu(cpu)->exit_ctx.VpContext.ExecutionState.Cpl == 3) {
+        code |= 4;
+    }
+    if (execute) {
+        code |= 16;
+    }
+    return whpx_simd_fault(cpu, 14, code, gva);
+}
+
+/* 1: handled (or guest exception injected); 0: use WinHvEmulation; -1: fatal.
+ * Handle recognized instructions BEFORE WinHvEmulation, whose failure does
+ * not promise that callbacks have had no side effects. */
+static int whpx_emulate_simd_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
+{
+    struct whpx_vcpu *vcpu = get_whpx_vcpu(cpu);
+    WHV_VP_EXIT_CONTEXT *vp = &vcpu->exit_ctx.VpContext;
+    CPUX86State *env = &X86_CPU(cpu)->env;
+    const WHV_REGISTER_NAME names[] = {
+        WHvX64RegisterRax, WHvX64RegisterRcx, WHvX64RegisterRdx,
+        WHvX64RegisterRbx, WHvX64RegisterRsp, WHvX64RegisterRbp,
+        WHvX64RegisterRsi, WHvX64RegisterRdi, WHvX64RegisterR8,
+        WHvX64RegisterR9,  WHvX64RegisterR10, WHvX64RegisterR11,
+        WHvX64RegisterR12, WHvX64RegisterR13, WHvX64RegisterR14,
+        WHvX64RegisterR15, WHvX64RegisterFs,  WHvX64RegisterGs,
+        WHvX64RegisterCr0, WHvX64RegisterCr4};
+    WHV_REGISTER_VALUE values[ARRAY_SIZE(names)], xmm, rip;
+    WHV_REGISTER_NAME xmm_name, rip_name = WHvX64RegisterRip;
+    WhpxSimdInsn d;
+    uint8_t code[15], data[32], vector[64];
+    uint64_t regs[16], gva, gpas[2], cr0, cr4;
+    unsigned lengths[2], chunks, offset, i, bit;
+    size_t available = MIN(ctx->InstructionByteCount, sizeof(code));
+    bool xsave;
+    int ret;
+    HRESULT hr;
+    MemTxAttrs attrs = {0};
+
+    if (!vp->ExecutionState.EferLma || !vp->Cs.Long ||
+        ctx->AccessInfo.AccessType == WHvMemoryAccessExecute) {
+        return 0;
+    }
+    memcpy(code, ctx->InstructionBytes, available);
+    for (;;) {
+        ret = whpx_simd_decode(code, available, &d);
+        if (ret >= 0) {
+            break;
+        }
+        if (available == sizeof(code)) {
+            return 0;
+        }
+        ret = whpx_simd_translate(cpu, vp->Rip + available, false, true,
+                                  &gpas[0]);
+        if (ret) {
+            return ret;
+        }
+        if (address_space_read(&address_space_memory, gpas[0], attrs,
+                               &code[available], 1) != MEMTX_OK) {
+            return -1;
+        }
+        ++available;
+    }
+    if (!ret) {
+        return 0;
+    }
+    if (d.store != (ctx->AccessInfo.AccessType == WHvMemoryAccessWrite)) {
+        return 0;
+    }
+    hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, names, ARRAY_SIZE(names),
+        values);
+    if (FAILED(hr)) {
+        return -1;
+    }
+    for (i = 0; i < 16; ++i) {
+        regs[i] = values[i].Reg64;
+    }
+    cr0 = values[18].Reg64;
+    cr4 = values[19].Reg64;
+    if ((cr0 & CR0_EM_MASK) || !(cr4 & CR4_OSFXSR_MASK)) {
+        return whpx_simd_fault(cpu, 6, 0, 0);
+    }
+    if (cr0 & CR0_TS_MASK) {
+        return whpx_simd_fault(cpu, 7, 0, 0);
+    }
+    xsave = whpx_has_xsave() && (cr4 & CR4_OSXSAVE_MASK);
+    env->cr[4] = cr4;
+    if (xsave) {
+        WHV_REGISTER_NAME xcr_name = WHvX64RegisterXCr0;
+        WHV_REGISTER_VALUE xcr;
+        hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+            whpx_global.partition, cpu->cpu_index, &xcr_name, 1, &xcr);
+        if (FAILED(hr)) {
+            return -1;
+        }
+        env->xcr0 = xcr.Reg64;
+    }
+    if (d.vex && (!xsave ||
+                  (env->xcr0 & (XSTATE_SSE_MASK | XSTATE_YMM_MASK)) !=
+                      (XSTATE_SSE_MASK | XSTATE_YMM_MASK) ||
+                  !(env->features[FEAT_1_ECX] & CPUID_EXT_AVX))) {
+        return whpx_simd_fault(cpu, 6, 0, 0);
+    }
+    gva = whpx_simd_address(&d, regs, vp->Rip, values[16].Segment.Base,
+                            values[17].Segment.Base);
+    /* Noncanonical accesses should be faulted by the architecture, never
+     * wrapped into a different physical page by the software copy. */
+    {
+        unsigned shift = (cr4 & CR4_LA57_MASK) ? 7 : 16;
+        uint64_t end = gva + d.size - 1;
+        if ((uint64_t)((int64_t)(gva << shift) >> shift) != gva || end < gva ||
+            (uint64_t)((int64_t)(end << shift) >> shift) != end) {
+            return 0;
+        }
+    }
+    if (d.aligned && (gva & (d.size - 1))) {
+        return whpx_simd_fault(cpu, 13, 0, 0);
+    }
+    lengths[0] = MIN(d.size, 4096 - (gva & 4095));
+    lengths[1] = d.size - lengths[0];
+    chunks = lengths[1] ? 2 : 1;
+    offset = 0;
+    for (i = 0; i < chunks; ++i) {
+        ret = whpx_simd_translate(cpu, gva + offset, d.store, false, &gpas[i]);
+        if (ret) {
+            return ret;
+        }
+        if (!address_space_access_valid(&address_space_memory, gpas[i],
+                                        lengths[i], d.store)) {
+            error_report("WHPX: SIMD access to unassigned GPA %llx",
+                         (unsigned long long)gpas[i]);
+            return -1;
+        }
+        offset += lengths[i];
+    }
+    /* The exit may refer to the second page of an unaligned access. */
+    if (!((ctx->Gpa >= gpas[0] && ctx->Gpa - gpas[0] < lengths[0]) ||
+          (chunks == 2 && ctx->Gpa >= gpas[1] &&
+           ctx->Gpa - gpas[1] < lengths[1]))) {
+        return 0;
+    }
+    xmm_name = (WHV_REGISTER_NAME)(WHvX64RegisterXmm0 + d.reg);
+    memset(vector, 0, sizeof(vector));
+    if (xsave) {
+        if (whpx_get_xsave_state(cpu) < 0) {
+            return -1;
+        }
+        for (i = 0; i < sizeof(vector); ++i) {
+            vector[i] = env->xmm_regs[d.reg].ZMM_B(i);
+        }
+    } else {
+        hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+            whpx_global.partition, cpu->cpu_index, &xmm_name, 1, &xmm);
+        if (FAILED(hr)) {
+            return -1;
+        }
+        memcpy(vector, &xmm.Reg128, 16);
+    }
+    if (d.store) {
+        memcpy(data, vector, d.size);
+    }
+    offset = 0;
+    for (i = 0; i < chunks; ++i) {
+        if (address_space_rw(&address_space_memory, gpas[i], attrs,
+                             data + offset, lengths[i], d.store) != MEMTX_OK) {
+            return -1;
+        }
+        offset += lengths[i];
+    }
+    if (!d.store) {
+        whpx_simd_load(&d, vector, data);
+        if (xsave) {
+            for (i = 0; i < sizeof(vector); ++i) {
+                env->xmm_regs[d.reg].ZMM_B(i) = vector[i];
+            }
+            env->xstate_bv |= XSTATE_SSE_MASK;
+            if (d.vex) {
+                env->xstate_bv |=
+                    env->xcr0 & (XSTATE_YMM_MASK | XSTATE_ZMM_Hi256_MASK);
+            }
+            if (whpx_set_xsave_state(cpu) < 0) {
+                return -1;
+            }
+        } else {
+            memcpy(&xmm.Reg128, vector, 16);
+            hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+                whpx_global.partition, cpu->cpu_index, &xmm_name, 1, &xmm);
+            if (FAILED(hr)) {
+                return -1;
+            }
+        }
+    } else {
+        /* Complete host writes before guest code can resume on another CPU,
+         * including MOVNTDQ stores to write-combined mappings. */
+        MemoryBarrier();
+    }
+    rip.Reg64 = vp->Rip + d.length;
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, &rip_name, 1, &rip);
+    if (FAILED(hr)) {
+        return -1;
+    }
+    cpu->vcpu_dirty = false;
+    bit = 1u << (d.kind * 2 + d.store);
+    if (!(vcpu->simd_logged & bit) && getenv("KEMU_WHPX_SIMD_LOG")) {
+        vcpu->simd_logged |= bit;
+        error_report("WHPX: SIMD MMIO cpu=%d kind=%u size=%u %s rip=%llx",
+                     cpu->cpu_index, d.kind, d.size, d.store ? "write" : "read",
+                     (unsigned long long)vp->Rip);
+    }
+    return 1;
+}
+
 static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
 {
     HRESULT hr;
@@ -1120,6 +1391,9 @@ static int whpx_handle_mmio(CPUState *cpu, WHV_MEMORY_ACCESS_CONTEXT *ctx)
     struct whpx_vcpu vcpu_copy = *vcpu;
     WHV_MEMORY_ACCESS_CONTEXT ctx_copy = *ctx;
     WHV_EMULATOR_STATUS emu_status;
+
+    int simd_result = whpx_emulate_simd_mmio(cpu, ctx);
+    if (simd_result) { return simd_result > 0 ? 0 : -1; }
 
     hr = whp_dispatch.WHvEmulatorTryMmioEmulation(
         vcpu->emulator, cpu,

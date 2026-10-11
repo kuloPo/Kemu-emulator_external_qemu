@@ -6,6 +6,9 @@ android_add_library(
       ${ANDROID_AUTOGEN}/tests/test-qapi-types.c ${ANDROID_AUTOGEN}/tests/test-qapi-visit.c tests/libqtest.c)
 target_link_libraries(libqemu-test PUBLIC android-qemu-deps android-emu-base)
 
+# Portable decoder/register semantics; no hypervisor or QEMU process needed.
+android_add_test(TARGET test-whpx-simd SRC tests/test-whpx-simd.c)
+
 android_add_library(
   TARGET libqemu-test-crypto
   LICENSE GPL-2.0-only
