@@ -418,6 +418,8 @@ static void virtio_wifi_device_realize(DeviceState* dev, Error** errp) {
 static void virtio_wifi_device_unrealize(DeviceState* dev, Error** errp) {
     VirtIODevice* vdev = VIRTIO_DEVICE(dev);
     VirtIOWifi* n = VIRTIO_WIFI(dev);
+    // Stop and drain callbacks while their queues are still alive.
+    globalState()->wifiService->stop();
     for (size_t index = 0; index < kQueueSize; index++) {
         if (n->vqs[index].unsent_tx) {
             virtio_consume_vqelem(n->vqs[index].tx,
@@ -430,7 +432,6 @@ static void virtio_wifi_device_unrealize(DeviceState* dev, Error** errp) {
         n->vqs[index].tx_bh = NULL;
     }
     delete[] n->vqs;
-    globalState()->wifiService->stop();
     virtio_cleanup(vdev);
 }
 

@@ -20,6 +20,8 @@
 namespace android {
 namespace qemu2 {
 
+class NetsimWifiConnection;
+
 class NetsimWifiForwarder : public WifiService {
 public:
     NetsimWifiForwarder(WifiService::OnReceiveCallback onRecv,
@@ -42,6 +44,7 @@ public:
 private:
     WifiService::OnReceiveCallback mOnRecv;
     WifiService::CanReceiveCallback mCanReceive;
+    std::unique_ptr<NetsimWifiConnection> mConnection;
 
     DISALLOW_COPY_AND_ASSIGN(NetsimWifiForwarder);
 };

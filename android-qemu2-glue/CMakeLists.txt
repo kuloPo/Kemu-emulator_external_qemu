@@ -105,6 +105,7 @@ endif()
 target_link_libraries(
   libqemu2-glue
   PRIVATE emulated-bluetooth-service-server-impl grpc++
+          netsim-wifi-connection
           packet-streamer-client-lib packet-streamer-proto-lib
           protobuf::libprotobuf)
 

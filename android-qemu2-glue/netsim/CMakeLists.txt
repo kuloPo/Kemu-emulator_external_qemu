@@ -1,4 +1,18 @@
 android_add_library(
+  TARGET netsim-wifi-connection
+  LICENSE GPL-2.0-only
+  SRC NetsimWifiConnection.cpp)
+target_include_directories(netsim-wifi-connection PUBLIC ${ANDROID_QEMU2_TOP_DIR})
+target_link_libraries(netsim-wifi-connection
+                     PUBLIC grpc++ packet-streamer-proto-lib
+                     PRIVATE android-emu-base)
+
+android_add_test(
+  TARGET netsim-wifi-connection_unittests
+  SRC NetsimWifiConnection_unittest.cpp
+  DEPS netsim-wifi-connection gmock_main)
+
+android_add_library(
   TARGET android-wifi-service
   LICENSE Apache-2.0
   SRC # cmake-format: sortable

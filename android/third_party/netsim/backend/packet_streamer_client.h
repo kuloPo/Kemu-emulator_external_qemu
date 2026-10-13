@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "grpcpp/channel.h"
 #include "netsim/packet_streamer.pb.h"
 
@@ -58,6 +60,10 @@ struct NetsimdOptions {
 void SetPacketStreamEndpoint(const std::string &endpoint);
 
 std::shared_ptr<grpc::Channel> CreateChannel(NetsimdOptions);
+
+// Like CreateChannel, but abort discovery/retry during device teardown.
+std::shared_ptr<grpc::Channel> CreateChannel(
+    NetsimdOptions, const std::function<bool()>& is_cancelled);
 
 // Deprecated.
 std::shared_ptr<grpc::Channel> CreateChannel(

@@ -43,7 +43,7 @@ namespace {
 const std::chrono::duration kConnectionDeadline = std::chrono::seconds(1);
 std::string custom_packet_stream_endpoint = "";
 std::shared_ptr<grpc::Channel> packet_stream_channel;
-std::mutex channel_mutex;
+std::timed_mutex channel_mutex;
 
 std::shared_ptr<grpc::Channel> CreateGrpcChannel() {
   auto endpoint = custom_packet_stream_endpoint;
@@ -115,16 +115,23 @@ void SetPacketStreamEndpoint(const std::string &endpoint) {
   if (endpoint != "default") custom_packet_stream_endpoint = endpoint;
 }
 
-std::shared_ptr<grpc::Channel> GetChannel(NetsimdOptions options) {
-  std::lock_guard<std::mutex> lock(channel_mutex);
+std::shared_ptr<grpc::Channel> GetChannel(
+    NetsimdOptions options, const std::function<bool()>& is_cancelled = {}) {
+  const auto cancelled = [&] { return is_cancelled && is_cancelled(); };
+  std::unique_lock<std::timed_mutex> lock(channel_mutex, std::defer_lock);
+  while (!lock.try_lock_for(std::chrono::milliseconds(100))) {
+    if (cancelled()) return nullptr;
+  }
 
   // bool is_netsimd_started = false;
   std::unique_ptr<android::base::ObservableProcess> netsimProc;
   for (int second : {1, 2, 4, 8}) {
+    if (cancelled()) return nullptr;
     if (!packet_stream_channel) packet_stream_channel = CreateGrpcChannel();
     if (GrpcChannelReady(packet_stream_channel)) return packet_stream_channel;
 
     packet_stream_channel.reset();
+    if (cancelled()) return nullptr;
 
     if ((!netsimProc || !netsimProc->isAlive()) &&
         custom_packet_stream_endpoint.empty()) {
@@ -133,7 +140,16 @@ std::shared_ptr<grpc::Channel> GetChannel(NetsimdOptions options) {
       netsimProc = RunNetsimd(options);
     }
     BtsLogInfo("Retry connecting to netsim in %d second.", second);
-    std::this_thread::sleep_for(std::chrono::seconds(second));
+    if (!is_cancelled) {
+      std::this_thread::sleep_for(std::chrono::seconds(second));
+    } else {
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::seconds(second);
+      while (std::chrono::steady_clock::now() < deadline) {
+        if (cancelled()) return nullptr;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
   }
 
   BtsLogError("Unable to get a packet stream channel.");
@@ -142,6 +158,11 @@ std::shared_ptr<grpc::Channel> GetChannel(NetsimdOptions options) {
 
 std::shared_ptr<grpc::Channel> CreateChannel(NetsimdOptions options) {
   return GetChannel(options);
+}
+
+std::shared_ptr<grpc::Channel> CreateChannel(
+    NetsimdOptions options, const std::function<bool()>& is_cancelled) {
+  return GetChannel(options, is_cancelled);
 }
 
 std::shared_ptr<grpc::Channel> CreateChannel(
