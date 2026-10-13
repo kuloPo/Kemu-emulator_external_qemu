@@ -54,11 +54,57 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
     }
     require(missingImage, "missing image must be reported instead of using old image layouts");
     std::ofstream(release / "system-img/vendor.img") << "image fixture";
+    for (const auto* name : {"build.prop", "kernel_cmdline.txt", "VerifiedBootParams.textproto"})
+        std::ofstream(installed.images / name) << "metadata fixture";
+    std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData = off\nGuestAngle = off\n";
     // A complete runtime must validate without any external build-script marker.
     installed.validate();
     const auto arguments = installed.arguments();
     require(arguments.size() > 3 && arguments[2] == L"-sysdir" &&
             arguments[3] == (release / "system-img").wstring(), "engine must receive the system-img directory");
+    require(arguments[arguments.size() - 2] == L"-feature" &&
+            arguments.back() == L"GuestAngle,-EncryptUserData", "GuestAngle must override the image default");
+
+    for (const auto* name : {"build.prop", "advancedFeatures.ini", "kernel_cmdline.txt", "VerifiedBootParams.textproto"}) {
+        const auto path = installed.images / name;
+        const auto contents = read(path);
+        kemu::fs::remove(path);
+        for (bool directory : {false, true}) {
+            if (directory) kemu::fs::create_directory(path);
+            bool rejected = false;
+            try { installed.validate(); } catch (const std::runtime_error& error) {
+                rejected = std::string(error.what()) == "Missing Android image: " + kemu::utf8(path.wstring());
+            }
+            require(rejected, "required metadata must be a file and report its full path");
+        }
+        kemu::fs::remove(path);
+        std::ofstream(path, std::ios::binary) << contents;
+    }
+    for (const auto* setting : {"EncryptUserData=on\n", "# EncryptUserData=off\r\n  EncryptUserData = ON \r\n",
+                               "\xEF\xBB\xBF" "EncryptUserData=on\n"}) {
+        std::ofstream(installed.images / "advancedFeatures.ini") << setting;
+        bool rejected = false;
+        try { installed.validate(); } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()) == "Missing Android image: " +
+                kemu::utf8((installed.images / "encryptionkey.img").wstring());
+        }
+        require(rejected, "encrypted image must require encryptionkey.img");
+        std::ofstream(installed.images / "encryptionkey.img") << "key fixture";
+        installed.validate();
+        require(installed.arguments().back() == L"GuestAngle,EncryptUserData", "encryption arguments must match validation");
+        kemu::fs::remove(installed.images / "encryptionkey.img");
+    }
+    for (const auto* setting : {"EncryptUserData=off\n", "# EncryptUserData=on\n", "EncryptUserData=on\nEncryptUserData=off\n"}) {
+        std::ofstream(installed.images / "advancedFeatures.ini") << setting;
+        installed.validate();
+        require(installed.arguments().back() == L"GuestAngle,-EncryptUserData", "unencrypted images must not require a key");
+    }
+    std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData=invalid\n";
+    bool invalidEncryption = false;
+    try { installed.validate(); } catch (const std::runtime_error& error) {
+        invalidEncryption = std::string(error.what()).find("Invalid EncryptUserData") != std::string::npos;
+    }
+    require(invalidEncryption, "invalid encryption setting must not silently disable key validation");
 }
 
 int main() {
@@ -102,7 +148,7 @@ int main() {
         require(resolved.parent_path() == kemu::fs::canonical(kemu::fs::temp_directory_path()) &&
                 resolved.filename() == temporary.filename(), "unexpected cleanup path");
         kemu::fs::remove_all(resolved);
-        std::cout << "PASS: launcher-relative engine and system-img discovery, missing file detection, preserved userdata, settings, Unicode paths, idempotence, atomic replacement and argument quoting\n";
+        std::cout << "PASS: launcher-relative paths, required image metadata, conditional encryption key, GuestAngle arguments, preserved userdata, settings, Unicode paths, idempotence, atomic replacement and argument quoting\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << " (fixtures retained at " << temporary << ")\n";

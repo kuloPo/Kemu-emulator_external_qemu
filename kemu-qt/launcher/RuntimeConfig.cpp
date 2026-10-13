@@ -4,6 +4,33 @@
 #include <stdexcept>
 
 namespace kemu {
+namespace {
+std::string trim(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    return first == std::string::npos ? std::string() :
+        value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+bool imageEncryptionEnabled(const fs::path& images) {
+    const auto path = images / "advancedFeatures.ini";
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("Cannot read configuration: " + utf8(path.wstring()));
+    bool enabled = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
+        const auto equal = line.find('=');
+        if (equal == std::string::npos || trim(line.substr(0, equal)) != "EncryptUserData") continue;
+        const auto value = trim(line.substr(equal + 1));
+        if (_stricmp(value.c_str(), "on") == 0) enabled = true;
+        else if (_stricmp(value.c_str(), "off") == 0) enabled = false;
+        else throw std::runtime_error("Invalid EncryptUserData (expected on or off): " + utf8(path.wstring()));
+    }
+    if (in.bad()) throw std::runtime_error("Cannot read configuration: " + utf8(path.wstring()));
+    return enabled;
+}
+}  // namespace
+
 std::string utf8(const std::wstring& value) {
     const int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), int(value.size()), nullptr, 0, nullptr, nullptr);
     std::string result(size, '\0');
@@ -37,9 +64,14 @@ RuntimeConfig RuntimeConfig::discover(const fs::path& applicationDir, const fs::
 void RuntimeConfig::validate() const {
     const auto executable = engine / "qemu/windows-x86_64/qemu-system-x86_64.exe";
     if (!fs::is_regular_file(executable)) throw std::runtime_error("Missing Kemu runtime: " + utf8(executable.wstring()));
-    for (const auto* name : {"system.img", "vendor.img", "ramdisk.img", "kernel-ranchu", "userdata.img"}) {
+    // This launcher uses the emu64xa image profile, including its verified boot metadata.
+    for (const auto* name : {"system.img", "vendor.img", "ramdisk.img", "kernel-ranchu", "userdata.img",
+                            "build.prop", "advancedFeatures.ini", "kernel_cmdline.txt", "VerifiedBootParams.textproto"}) {
         if (!fs::is_regular_file(images / name)) throw std::runtime_error("Missing Android image: " + utf8((images / name).wstring()));
     }
+    const auto key = images / "encryptionkey.img";
+    if (imageEncryptionEnabled(images) && !fs::is_regular_file(key))
+        throw std::runtime_error("Missing Android image: " + utf8(key.wstring()));
 }
 
 void updateIni(const fs::path& path, const std::map<std::string, std::string>& values) {
@@ -101,8 +133,13 @@ void RuntimeConfig::prepare() const {
 }
 
 std::vector<std::wstring> RuntimeConfig::arguments() const {
+    // Pin the image's encryption setting so user/environment feature overrides cannot
+    // enable encryption after validation skipped its key, or disable an encrypted image.
+    const auto features = imageEncryptionEnabled(images) ?
+        L"GuestAngle,EncryptUserData" : L"GuestAngle,-EncryptUserData";
     return {L"-avd", L"kemu", L"-sysdir", images.wstring(), L"-port", L"5554",
             L"-cores", L"8", L"-memory", L"16384", L"-gpu", L"auto", L"-no-snapshot",
-            L"-no-boot-anim", L"-no-metrics", L"-crash-report-mode", L"never"};
+            L"-no-boot-anim", L"-no-metrics", L"-crash-report-mode", L"never",
+            L"-feature", features};
 }
 }  // namespace kemu
