@@ -65,7 +65,7 @@ void RuntimeConfig::validate() const {
     const auto executable = engine / "qemu/windows-x86_64/qemu-system-x86_64.exe";
     if (!fs::is_regular_file(executable)) throw std::runtime_error("Missing Kemu runtime: " + utf8(executable.wstring()));
     // This launcher uses the emu64xa image profile, including its verified boot metadata.
-    for (const auto* name : {"system.img", "vendor.img", "ramdisk.img", "kernel-ranchu", "userdata.img",
+    for (const auto* name : {"system.img", "ramdisk.img", "kernel-ranchu", "userdata.img",
                             "build.prop", "advancedFeatures.ini", "kernel_cmdline.txt", "VerifiedBootParams.textproto"}) {
         if (!fs::is_regular_file(images / name)) throw std::runtime_error("Missing Android image: " + utf8((images / name).wstring()));
     }

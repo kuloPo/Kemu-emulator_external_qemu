@@ -50,10 +50,9 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
     bool missingImage = false;
     try { installed.validate(); } catch (const std::runtime_error& error) {
         missingImage = std::string(error.what()).find(kemu::utf8(
-            (release / "system-img" / "vendor.img").wstring())) != std::string::npos;
+            (release / "system-img" / "build.prop").wstring())) != std::string::npos;
     }
     require(missingImage, "missing image must be reported instead of using old image layouts");
-    std::ofstream(release / "system-img/vendor.img") << "image fixture";
     for (const auto* name : {"build.prop", "kernel_cmdline.txt", "VerifiedBootParams.textproto"})
         std::ofstream(installed.images / name) << "metadata fixture";
     std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData = off\nGuestAngle = off\n";
