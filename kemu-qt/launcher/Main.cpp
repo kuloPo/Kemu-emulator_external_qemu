@@ -62,6 +62,14 @@ int launch() {
     std::wstring module(32768, L'\0');
     module.resize(GetModuleFileNameW(nullptr, module.data(), DWORD(module.size())));
     const auto config = kemu::RuntimeConfig::discover(kemu::fs::path(module).parent_path(), environment(L"LOCALAPPDATA"));
+    if (kemu::fs::exists(config.engine / ".kemu-update-pending")) {
+        const auto updater = config.engine / "KemuUpdater.exe";
+        auto command = kemu::quoteArgument(updater.wstring()) + L" --recover " + kemu::quoteArgument(config.engine.wstring());
+        STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION process{};
+        if (!CreateProcessW(updater.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, config.engine.c_str(), &startup, &process))
+            throw std::runtime_error("Cannot recover pending update. Download the full release: https://github.com/kuloPo/Kemu/releases");
+        CloseHandle(process.hProcess); CloseHandle(process.hThread); return 0;
+    }
     const auto instance = instanceName(config.avdRoot);
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     Handle lease{CreateMutexW(&security, FALSE, (L"Local\\" + instance).c_str())};
@@ -78,6 +86,7 @@ int launch() {
     setEnv(L"ANDROID_EMULATOR_HOME", (config.avdRoot / "emulator-home").wstring());
     setEnv(L"ANDROID_EMULATOR_LAUNCHER_DIR", config.engine.wstring());
     setEnv(L"KEMU_UI", L"1");
+    setEnv(L"KEMU_INSTALL_ROOT", config.engine.wstring());
     setEnv(L"KEMU_INSTANCE", instance);
     setEnv(L"KEMU_INSTANCE_HANDLE", std::to_wstring(reinterpret_cast<uintptr_t>(lease.value)));
     SetEnvironmentVariableW(L"QT_SCALE_FACTOR", nullptr);

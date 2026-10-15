@@ -14,6 +14,7 @@ class QEvent;
 
 namespace kemu {
 class AndroidMute;
+class UpdateController;
 bool enabled();
 
 // Owns only Kemu's chrome. EmulatorContainer remains the real top-level window;
@@ -43,6 +44,7 @@ private:
     QLabel* mLoadingText = nullptr;
     IconButton* mMaximize = nullptr;
     AndroidMute* mMute = nullptr;
+    UpdateController* mUpdates = nullptr;
     QVector<IconButton*> mButtons;
     QTimer mResize;
     QTimer mBootPoll;

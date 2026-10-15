@@ -1,6 +1,10 @@
 #include "WindowChrome.h"
+#include "UiFont.h"
 #include "IconButton.h"
 #include "AndroidMute.h"
+#ifdef _WIN32
+#include "UpdateController.h"
+#endif
 
 #include <QApplication>
 #include <QAccessibleWidget>
@@ -70,7 +74,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         "#KemuWindow { background: #15191f; border: none; }"
         "QToolTip { color: #edf1f6; background: #29323e; border: 1px solid #414d5e; padding: 5px; }");
     container->viewport()->setStyleSheet("background: #0c0e12;");
-    container->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
+    container->setFont(uiFont());
     mTitle = new QWidget(container);
     mTitle->setObjectName("KemuTitleBar");
     mTitle->installEventFilter(this);
@@ -86,7 +90,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     title->addSpacing(6);
     auto* brand = new QLabel("Kemu", mTitle);
     brand->setAttribute(Qt::WA_TransparentForMouseEvents);
-    brand->setStyleSheet("color: #eef3fa; font-family: 'Microsoft YaHei UI'; font-size: 14px; font-weight: 600;");
+    brand->setStyleSheet("color: #eef3fa;");
     title->addWidget(brand);
     title->addStretch();
     auto* minimize = new IconButton(Icon::Minimize, QStringLiteral("最小化"), mTitle);
@@ -152,6 +156,14 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         }
     }
     side->addStretch();
+#ifdef _WIN32
+    mUpdates = new UpdateController(container,
+        [display] { return QString::fromStdString(display->getAdbInterface()->adbPath()); },
+        [display] { return QString::fromStdString(display->getAdbInterface()->serialString()); });
+    auto* settings = new IconButton(Icon::Settings, QStringLiteral("设置"), mSidebar);
+    settings->setObjectName("KemuSettingsButton"); side->addWidget(settings);
+    connect(settings, &QAbstractButton::clicked, mUpdates, &UpdateController::showSettings);
+#endif
     // A native sibling of the viewport covers the GPU child during boot.
     mLoading = new QWidget(container);
     mLoading->setObjectName("KemuLoading");
@@ -170,7 +182,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mLoadingText = new QLabel(QStringLiteral("启动中"), mLoading);
     mLoadingText->setObjectName("KemuLoadingText");
     mLoadingText->setAlignment(Qt::AlignCenter);
-    mLoadingText->setStyleSheet("color: #d9dfe8; font-family: 'Microsoft YaHei UI'; font-size: 18px; font-weight: 500;");
+    mLoadingText->setStyleSheet("color: #d9dfe8;");
     loadingRow->addWidget(mLoadingText);
     loadingRow->addStretch();
     loading->addLayout(loadingRow);
@@ -192,6 +204,10 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     container->resize(width + 54, width * 9 / 16 + 42);
     container->move(available.center() - container->rect().center());
     layout();
+    applyUiFont(mTitle);
+    applyUiFont(brand, uiFont(10, QFont::DemiBold));
+    applyUiFont(mSidebar);
+    applyUiFont(mLoading, uiFont(13, QFont::Medium));
     mTitle->show();
     mSidebar->show();
     mLoading->show();
@@ -267,12 +283,11 @@ void WindowChrome::checkAdb() {
     mAdbPath = QString::fromStdString(adb->adbPath());
     if (!mAdbPath.isEmpty()) return;
 
-    auto* warning = new QMessageBox(QMessageBox::Warning, QStringLiteral("Kemu"),
+    auto* warning = new UiMessageBox(QMessageBox::Warning, QStringLiteral("Kemu"),
         QStringLiteral("未找到可用的 ADB"), QMessageBox::Ok, mContainer);
     warning->setObjectName("KemuAdbWarning");
     warning->setAttribute(Qt::WA_DeleteOnClose);
     warning->setWindowIcon(mContainer->windowIcon());
-    warning->setFont(QFont(QStringLiteral("Microsoft YaHei UI"), 9));
     warning->setInformativeText(QStringLiteral(
         "APK 安装、文件传输等功能将不可用，模拟器仍可继续运行。\n\n"
         "请将 ADB 所在目录加入 PATH，或将 adb.exe 及配套 DLL 放入 Kemu.exe 同级目录下的 platform-tools，"
@@ -317,6 +332,9 @@ bool WindowChrome::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void WindowChrome::beginClose() {
+#ifdef _WIN32
+    if (mUpdates) mUpdates->stop();
+#endif
     if (mClosing) return;
     mClosing = true;
     mBootPoll.stop();

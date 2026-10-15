@@ -1,6 +1,7 @@
 #include "IconButton.h"
 #include <QPainter>
 #include <QPainterPath>
+#include <cmath>
 
 IconButton::IconButton(Icon icon, const QString& label, QWidget* parent)
     : QAbstractButton(parent), m_icon(icon) {
@@ -44,6 +45,18 @@ void IconButton::paintEvent(QPaintEvent*) {
     case Icon::Back: p.drawLine(QPointF(18, 12), QPointF(6, 12)); p.drawPolyline(QPolygonF{QPointF(11, 7), QPointF(6, 12), QPointF(11, 17)}); break;
     case Icon::Home: p.drawEllipse(QRectF(5.5, 5.5, 13, 13)); break;
     case Icon::Recents: p.drawRoundedRect(QRectF(5.5, 5.5, 13, 13), 2, 2); break;
+    case Icon::Settings: {
+        QPainterPath gear;
+        for (int tooth = 0; tooth < 8; ++tooth) {
+            for (int corner = 0; corner < 4; ++corner) {
+                const double angle = (tooth * 45.0 + corner * 11.25 - 5.625) * 3.141592653589793 / 180.0;
+                const double radius = (corner == 1 || corner == 2) ? 9.0 : 7.0;
+                QPointF point(12 + radius * std::cos(angle), 12 + radius * std::sin(angle));
+                if (!tooth && !corner) gear.moveTo(point); else gear.lineTo(point);
+            }
+        }
+        gear.closeSubpath(); p.drawPath(gear); p.drawEllipse(QRectF(9, 9, 6, 6)); break;
+    }
     case Icon::Minimize: p.drawLine(QPointF(7, 12), QPointF(17, 12)); break;
     case Icon::Maximize: p.drawRect(QRectF(7, 7, 10, 10)); break;
     case Icon::Restore: p.drawRect(QRectF(6, 9, 9, 9)); p.drawPolyline(QPolygonF{QPointF(9, 6), QPointF(18, 6), QPointF(18, 15)}); break;

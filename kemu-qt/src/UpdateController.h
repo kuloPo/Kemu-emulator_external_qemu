@@ -1,0 +1,45 @@
+#pragma once
+#include <QObject>
+#include <QString>
+#include <QStringList>
+#include <QByteArray>
+#include <atomic>
+#include <functional>
+#include <memory>
+#include "../update/UpdateCore.h"
+class QProgressBar; class QCheckBox; class QDialog; class QLabel; class QPushButton; class QThread; class QWidget;
+namespace kemu {
+class UpdateController final : public QObject {
+public:
+    UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history = {});
+    ~UpdateController() override;
+    void showSettings();
+    void stop();
+private:
+    void check(bool automatic = false);
+    void offerInstall();
+    void fetch(bool automatic);
+    void startup();
+    void install();
+    void status(const QString& text);
+    void refresh();
+    void work(std::function<void()> task, std::function<void()> finished);
+    void prepare(const QString& adb, const QString& serial);
+    QByteArray adbCommand(const QString& adb, const QString& serial, const QStringList& args, int timeout = 120000);
+    QWidget* mWindow;
+    QDialog* mDialog;
+    QLabel* mStatus;
+    QLabel* mVersion;
+    QPushButton* mCheck;
+    QPushButton* mCancelButton;
+    QProgressBar* mProgress;
+    QCheckBox* mAutoUpdate;
+    std::function<QString()> mAdb, mSerial;
+    std::function<update::Json()> mHistory;
+    update::fs::path mRoot, mStage;
+    update::Plan mPlan;
+    QThread* mWorker = nullptr;
+    std::atomic<bool> mCancel{false};
+    bool mBusy = false, mDownloaded = false, mClosing = false;
+};
+}

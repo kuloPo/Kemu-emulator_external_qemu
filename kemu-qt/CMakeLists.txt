@@ -34,3 +34,60 @@ if(WINDOWS_MSVC_X86_64)
     target_include_directories(kemu-config-tests PRIVATE launcher)
     set_target_properties(kemu-config-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 endif()
+
+if(WINDOWS_MSVC_X86_64)
+    set(KEMU_JSON ${CMAKE_CURRENT_LIST_DIR}/../android/third_party/json/single_include)
+    set(KEMU_ZLIB ${CMAKE_CURRENT_LIST_DIR}/../../zlib)
+    add_library(kemu-update-zip STATIC
+        ${KEMU_ZLIB}/contrib/minizip/unzip.c
+        ${KEMU_ZLIB}/contrib/minizip/ioapi.c
+        ${KEMU_ZLIB}/contrib/minizip/iowin32.c)
+    target_include_directories(kemu-update-zip PUBLIC ${KEMU_ZLIB}/contrib/minizip)
+    target_link_libraries(kemu-update-zip PUBLIC zlib)
+    set_target_properties(kemu-update-zip PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+    android_license(TARGET kemu-update-zip LIBNAME minizip URL None SPDX Zlib LICENSE None LOCAL "${KEMU_ZLIB}/LICENSE")
+    android_license(TARGET bcrypt winhttp shell32 libcmt libcpmt libvcruntime libucrt LIBNAME None SPDX None LICENSE None LOCAL None)
+    target_sources(aemu-ui-qt PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.h
+        ${CMAKE_CURRENT_LIST_DIR}/update/UpdateCore.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/update/UpdateDownload.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/update/UpdateTransaction.cpp)
+    target_include_directories(aemu-ui-qt PRIVATE ${KEMU_JSON})
+    target_link_libraries(aemu-ui-qt PRIVATE kemu-update-zip bcrypt winhttp)
+    add_executable(KemuUpdater WIN32 update/UpdaterMain.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp resources/kemu.rc)
+    target_compile_features(KemuUpdater PRIVATE cxx_std_17)
+    target_compile_definitions(KemuUpdater PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    # The helper must not load runtime DLLs from the installation it replaces.
+    target_compile_options(KemuUpdater PRIVATE /MT)
+    target_include_directories(KemuUpdater PRIVATE ${KEMU_JSON} resources)
+    target_link_libraries(KemuUpdater PRIVATE bcrypt user32 shell32 libcmt libcpmt libvcruntime libucrt)
+    set_target_properties(KemuUpdater PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+    android_license(TARGET KemuUpdater LIBNAME Kemu URL None SPDX GPL-2.0-only LICENSE None LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
+    android_install_exe(KemuUpdater .)
+    add_executable(kemu-update-tests tests/UpdateTests.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    target_compile_features(kemu-update-tests PRIVATE cxx_std_17)
+    target_compile_definitions(kemu-update-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(kemu-update-tests PRIVATE ${KEMU_JSON} update)
+    target_link_libraries(kemu-update-tests PRIVATE bcrypt winhttp kemu-update-zip)
+    set_target_properties(kemu-update-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+endif()
+
+if(WINDOWS_MSVC_X86_64)
+    add_executable(kemu-update-ui-tests tests/UpdateUiTests.cpp src/UpdateController.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    target_compile_features(kemu-update-ui-tests PRIVATE cxx_std_17)
+    target_compile_definitions(kemu-update-ui-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_include_directories(kemu-update-ui-tests PRIVATE ${KEMU_JSON})
+    target_link_libraries(kemu-update-ui-tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets bcrypt winhttp kemu-update-zip)
+    set_target_properties(kemu-update-ui-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+endif()
+
+if(WINDOWS_MSVC_X86_64)
+    add_executable(kemu-update-handoff-tests tests/UpdateHandoffTests.cpp update/UpdateCore.cpp)
+    target_compile_features(kemu-update-handoff-tests PRIVATE cxx_std_17)
+    target_compile_definitions(kemu-update-handoff-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(kemu-update-handoff-tests PRIVATE /MT)
+    target_include_directories(kemu-update-handoff-tests PRIVATE ${KEMU_JSON} update)
+    target_link_libraries(kemu-update-handoff-tests PRIVATE bcrypt libcmt libcpmt libvcruntime libucrt)
+    set_target_properties(kemu-update-handoff-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+endif()

@@ -1,7 +1,7 @@
 #pragma once
 #include <QAbstractButton>
 
-enum class Icon { VolumeUp, VolumeDown, Mute, Back, Home, Recents, Minimize, Maximize, Restore, Close };
+enum class Icon { VolumeUp, VolumeDown, Mute, Back, Home, Recents, Settings, Minimize, Maximize, Restore, Close };
 class IconButton : public QAbstractButton {
     Q_OBJECT
 public:
