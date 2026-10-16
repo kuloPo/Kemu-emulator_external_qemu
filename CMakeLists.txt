@@ -1009,6 +1009,11 @@ if(NOT OPTION_AEMU_LIBS_ONLY)
   target_link_libraries(qemu-img PRIVATE libqemu2-util libqemustub
                                          android-qemu-deps android-emu)
 
+  # Kemu for Windows ships only the windowed x86_64 engine.
+  if(WINDOWS_MSVC_X86_64)
+    android_add_qemu_executable(
+      x86_64 "${ANDROID_QEMU_i386_DEVICES_${ANDROID_TARGET_TAG}}")
+  else()
   # Create the qemu targets.
   if(NOT BUILDING_FOR_AARCH64)
     android_add_qemu_executable(
@@ -1032,6 +1037,8 @@ if(NOT OPTION_AEMU_LIBS_ONLY)
       armel "${ANDROID_QEMU_arm_DEVICES_${ANDROID_TARGET_TAG}}")
     android_add_qemu_headless_executable(
       armel "${ANDROID_QEMU_arm_DEVICES_${ANDROID_TARGET_TAG}}")
+  endif()
+
   endif()
 
   # The tests currently work on linux x86 only.

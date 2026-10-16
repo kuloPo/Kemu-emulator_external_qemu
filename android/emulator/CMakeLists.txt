@@ -4,6 +4,11 @@ prebuilt(SKIN)
 prebuilt(E2FSPROGS)
 prebuilt(MACROS)
 prebuilt(MSVC)
+if(WINDOWS_MSVC_X86_64)
+  # Kemu launches QEMU directly; retain runtime resource staging below.
+  set(EMULATOR_RUNTIME_TARGET Kemu)
+else()
+  set(EMULATOR_RUNTIME_TARGET emulator)
 android_add_executable(
   TARGET emulator INSTALL .
   LICENSE Apache-2.0
@@ -59,6 +64,8 @@ else()
     crashpad_handler)
 endif()
 
+endif()
+
 set(PC_BIOS "${ANDROID_QEMU2_TOP_DIR}/pc-bios")
 set(EMULATOR_BIOS_DEPENDENCIES
   "${PC_BIOS}/bios.bin>lib/pc-bios/bios.bin"
@@ -89,30 +96,30 @@ set(CERT_DEPEPENDENCIES
 set(EMULATOR_HW_DEPENDENCIES "${HW_PROPERTIES_INI}>lib/hardware-properties.ini")
 
 # Install all the depencies in the right place during build
-android_target_dependency(emulator all QT5_SHARED_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all QT5_SHARED_DEPENDENCIES)
 if(QTWEBENGINE)
-  android_target_dependency(emulator all QT5_WEBENGINE_SHARED_DEPENDENCIES)
+  android_target_dependency(${EMULATOR_RUNTIME_TARGET} all QT5_WEBENGINE_SHARED_DEPENDENCIES)
 endif()
-android_target_dependency(emulator all EMULATOR_FEATURE_DEPENDENCIES)
-android_target_dependency(emulator all EMULATOR_KEYMAP_DEPENDENCIES)
-android_target_dependency(emulator all EMULATOR_BIOS_DEPENDENCIES)
-android_target_dependency(emulator windows SWIFTSHADER_DEPENDENCIES)
-android_target_dependency(emulator linux SWIFTSHADER_DEPENDENCIES)
-android_target_dependency(emulator linux LLVMPIPE_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all EMULATOR_FEATURE_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all EMULATOR_KEYMAP_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all EMULATOR_BIOS_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} windows SWIFTSHADER_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} linux SWIFTSHADER_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} linux LLVMPIPE_DEPENDENCIES)
 if(NOT LINUX_AARCH64)
-  android_target_dependency(emulator all ANGLE_DEPENDENCIES)
-  android_target_dependency(emulator all ANGLE_RENDERER_DEPENDENCIES)
+  android_target_dependency(${EMULATOR_RUNTIME_TARGET} all ANGLE_DEPENDENCIES)
+  android_target_dependency(${EMULATOR_RUNTIME_TARGET} all ANGLE_RENDERER_DEPENDENCIES)
 endif()
-android_target_dependency(emulator all RUNTIME_OS_DEPENDENCIES)
-android_target_dependency(emulator all E2FSPROGS_DEPENDENCIES)
-android_target_dependency(emulator all CERT_DEPEPENDENCIES)
-android_target_dependency(emulator all EMULATOR_HW_DEPENDENCIES)
-android_target_dependency(emulator all VIRTUAL_SCENE_DEPENDENCIES)
-android_target_dependency(emulator all SKIN_DEPENDENCIES)
-android_target_dependency(emulator all EMULATOR_MACROS_DEPENDENCIES)
-android_target_dependency(emulator all VULKAN_DEPENDENCIES)
-android_target_dependency(emulator linux TCMALLOC_OS_DEPENDENCIES)
-android_target_dependency(emulator windows_msvc-x86_64 MSVC_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all RUNTIME_OS_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all E2FSPROGS_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all CERT_DEPEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all EMULATOR_HW_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all VIRTUAL_SCENE_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all SKIN_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all EMULATOR_MACROS_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} all VULKAN_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} linux TCMALLOC_OS_DEPENDENCIES)
+android_target_dependency(${EMULATOR_RUNTIME_TARGET} windows_msvc-x86_64 MSVC_DEPENDENCIES)
 # And install them for a release.
 # TODO(b/141205876): prebuilt executables are losing their execute permission on
 # installation. Once this issue is fixed, remove all of these
@@ -157,7 +164,7 @@ android_license(TARGET "EMULATOR_FEATURE_DEPENDENCIES" LIBNAME None SPDX None
   LICENSE None LOCAL None)
 
 # And set the os specific properties
-android_target_properties(emulator all "${RUNTIME_OS_PROPERTIES}")
+android_target_properties(${EMULATOR_RUNTIME_TARGET} all "${RUNTIME_OS_PROPERTIES}")
 
 # Install files we need.
 install(FILES ${ANDROID_QEMU2_TOP_DIR}/LICENSES/LICENSE.APACHE2 DESTINATION .
