@@ -1,5 +1,6 @@
 #include "WindowChrome.h"
 #include "UiFont.h"
+#include "UiLanguage.h"
 #include "IconButton.h"
 #include "AndroidMute.h"
 #ifdef _WIN32
@@ -49,6 +50,7 @@ bool enabled() {
 
 WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* display)
     : QObject(container), mContainer(container), mDisplay(display) {
+    initializeUiTranslations();
     initKemuResources();
     // The renderer asks effectiveWinId() for its parent. Give the display its
     // own native handle so GPU coordinates follow its centered position rather
@@ -93,9 +95,9 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     brand->setStyleSheet("color: #eef3fa;");
     title->addWidget(brand);
     title->addStretch();
-    auto* minimize = new IconButton(Icon::Minimize, QStringLiteral("最小化"), mTitle);
-    mMaximize = new IconButton(Icon::Maximize, QStringLiteral("最大化"), mTitle);
-    auto* close = new IconButton(Icon::Close, QStringLiteral("关闭"), mTitle);
+    auto* minimize = new IconButton(Icon::Minimize, QCoreApplication::translate("Kemu", "Minimize"), mTitle);
+    mMaximize = new IconButton(Icon::Maximize, QCoreApplication::translate("Kemu", "Maximize"), mTitle);
+    auto* close = new IconButton(Icon::Close, QCoreApplication::translate("Kemu", "Close"), mTitle);
     minimize->setObjectName("KemuMinimize");
     mMaximize->setObjectName("KemuMaximize");
     close->setObjectName("KemuClose");
@@ -116,14 +118,15 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     side->setContentsMargins(6, 10, 6, 10);
     side->setSpacing(5);
     const struct { Icon icon; const char* label; QtUICommand command; } specs[] = {
-        {Icon::VolumeUp, "音量＋", QtUICommand::VOLUME_UP},
-        {Icon::VolumeDown, "音量－", QtUICommand::VOLUME_DOWN},
-        {Icon::Mute, "静音／取消静音", QtUICommand::VOLUME_DOWN},
-        {Icon::Back, "返回", QtUICommand::BACK},
-        {Icon::Home, "Home", QtUICommand::HOME},
-        {Icon::Recents, "任务切换", QtUICommand::OVERVIEW}};
+        {Icon::VolumeUp, QT_TRANSLATE_NOOP("Kemu", "Volume up"), QtUICommand::VOLUME_UP},
+        {Icon::VolumeDown, QT_TRANSLATE_NOOP("Kemu", "Volume down"), QtUICommand::VOLUME_DOWN},
+        {Icon::Mute, QT_TRANSLATE_NOOP("Kemu", "Mute / Unmute"), QtUICommand::VOLUME_DOWN},
+        {Icon::Back, QT_TRANSLATE_NOOP("Kemu", "Back"), QtUICommand::BACK},
+        {Icon::Home, QT_TRANSLATE_NOOP("Kemu", "Home"), QtUICommand::HOME},
+        {Icon::Recents, QT_TRANSLATE_NOOP("Kemu", "Recent apps"), QtUICommand::OVERVIEW}};
     for (const auto& spec : specs) {
-        auto* button = new IconButton(spec.icon, QString::fromUtf8(spec.label), mSidebar);
+        auto* button = new IconButton(spec.icon, QCoreApplication::translate("Kemu", spec.label), mSidebar);
+        button->setProperty("kemuLabel", spec.label);
         button->setEnabled(false);
         if (spec.icon == Icon::VolumeUp || spec.icon == Icon::VolumeDown) {
             button->setAutoRepeat(true);
@@ -136,7 +139,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
                 button->setEnabled(false);
                 mMute->send([this, button](const QString& error) {
                     button->setEnabled(!mClosing);
-                    button->setToolTip(error.isEmpty() ? QStringLiteral("静音／取消静音") : error);
+                    button->setToolTip(error.isEmpty() ? QCoreApplication::translate("Kemu", "Mute / Unmute") : error);
                     if (!error.isEmpty()) qWarning("Kemu mute: %s", qPrintable(error));
                 });
             } else {
@@ -160,7 +163,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mUpdates = new UpdateController(container,
         [display] { return QString::fromStdString(display->getAdbInterface()->adbPath()); },
         [display] { return QString::fromStdString(display->getAdbInterface()->serialString()); });
-    auto* settings = new IconButton(Icon::Settings, QStringLiteral("设置"), mSidebar);
+    auto* settings = new IconButton(Icon::Settings, QCoreApplication::translate("Kemu", "Settings"), mSidebar);
     settings->setObjectName("KemuSettingsButton"); side->addWidget(settings);
     connect(settings, &QAbstractButton::clicked, mUpdates, &UpdateController::showSettings);
 #endif
@@ -179,7 +182,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     loadingLogo->setPixmap(container->windowIcon().pixmap(QSize(36, 36)));
     loadingLogo->setFixedSize(36, 36);
     loadingRow->addWidget(loadingLogo);
-    mLoadingText = new QLabel(QStringLiteral("启动中"), mLoading);
+    mLoadingText = new QLabel(QCoreApplication::translate("Kemu", "Starting"), mLoading);
     mLoadingText->setObjectName("KemuLoadingText");
     mLoadingText->setAlignment(Qt::AlignCenter);
     mLoadingText->setStyleSheet("color: #d9dfe8;");
@@ -211,6 +214,22 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mTitle->show();
     mSidebar->show();
     mLoading->show();
+#ifdef _WIN32
+    mUpdates->languageChanged = [this, minimize, close, settings] {
+        const auto label = [](IconButton* button, const QString& text) {
+            button->setToolTip(text); button->setAccessibleName(text);
+        };
+        label(minimize, QCoreApplication::translate("Kemu", "Minimize"));
+        label(close, QCoreApplication::translate("Kemu", "Close"));
+        label(settings, QCoreApplication::translate("Kemu", "Settings"));
+        for (auto* button : mButtons) {
+            const auto text = QCoreApplication::translate("Kemu", button->property("kemuLabel").toByteArray().constData());
+            button->setToolTip(text); button->setAccessibleName(text);
+        }
+        mLoadingText->setText(QCoreApplication::translate("Kemu", "Starting"));
+        updateWindowState();
+    };
+#endif
     QTimer::singleShot(0, this, &WindowChrome::checkAdb);
 #ifdef _WIN32
     const HWND handle = reinterpret_cast<HWND>(container->winId());
@@ -284,22 +303,20 @@ void WindowChrome::checkAdb() {
     if (!mAdbPath.isEmpty()) return;
 
     auto* warning = new UiMessageBox(QMessageBox::Warning, QStringLiteral("Kemu"),
-        QStringLiteral("未找到可用的 ADB"), QMessageBox::Ok, mContainer);
+        QCoreApplication::translate("Kemu", "No usable ADB found"), QMessageBox::Ok, mContainer);
     warning->setObjectName("KemuAdbWarning");
     warning->setAttribute(Qt::WA_DeleteOnClose);
     warning->setWindowIcon(mContainer->windowIcon());
-    warning->setInformativeText(QStringLiteral(
-        "APK 安装、文件传输等功能将不可用，模拟器仍可继续运行。\n\n"
-        "请将 ADB 所在目录加入 PATH，或将 adb.exe 及配套 DLL 放入 Kemu.exe 同级目录下的 platform-tools，"
-        "然后重新启动 Kemu。"));
-    warning->button(QMessageBox::Ok)->setText(QStringLiteral("继续启动"));
+    warning->setInformativeText(QCoreApplication::translate("Kemu", "APK installation and file transfer are unavailable. The emulator can continue running.\n\n"
+        "Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.exe, then restart Kemu."));
+    warning->button(QMessageBox::Ok)->setText(QCoreApplication::translate("Kemu", "Continue"));
     warning->open();
 }
 
 void WindowChrome::updateWindowState() {
     const bool maximized = mContainer->isMaximized();
     mMaximize->setIconType(maximized ? Icon::Restore : Icon::Maximize);
-    const QString label = maximized ? QStringLiteral("还原") : QStringLiteral("最大化");
+    const QString label = maximized ? QCoreApplication::translate("Kemu", "Restore") : QCoreApplication::translate("Kemu", "Maximize");
     mMaximize->setToolTip(label);
     mMaximize->setAccessibleName(label);
     layout();
@@ -341,7 +358,7 @@ void WindowChrome::beginClose() {
     mResize.stop();
     mMute->cancel();
     for (auto* button : mButtons) button->setEnabled(false);
-    mLoadingText->setText(QStringLiteral("关闭中"));
+    mLoadingText->setText(QCoreApplication::translate("Kemu", "Closing"));
     mLoading->show();
     mLoading->raise();
 }

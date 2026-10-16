@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/kemu/translations">
+        <file alias="kemu_zh_CN.qm">@KEMU_TRANSLATION_QM@</file>
+    </qresource>
+</RCC>

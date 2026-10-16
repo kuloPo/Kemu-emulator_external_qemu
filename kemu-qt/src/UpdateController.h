@@ -15,6 +15,7 @@ public:
     ~UpdateController() override;
     void showSettings();
     void stop();
+    std::function<void()> languageChanged;
 private:
     void check(bool automatic = false);
     void offerInstall();

@@ -1,4 +1,5 @@
 #include "AndroidMute.h"
+#include <QCoreApplication>
 
 #include <QThread>
 #include <chrono>
@@ -56,7 +57,7 @@ bool AndroidMute::send(std::function<void(QString)> completed) {
             std::lock_guard<std::mutex> lock(request->mutex);
             if (request->cancelled) return;
         }
-        if (!connection) { request->error = QStringLiteral("Android 连接不可用"); return; }
+        if (!connection) { request->error = QCoreApplication::translate("Kemu", "Android connection is unavailable"); return; }
         // Fixed command: the marker reports the guest command's exit status
         // even when using the shell v1 protocol. No host adb.exe is launched.
         const auto stream = connection->open("shell:input keyevent 164; echo __KEMU_KEY_EXIT:$?", 2000ms);
@@ -65,13 +66,13 @@ bool AndroidMute::send(std::function<void(QString)> completed) {
             request->stream = stream;
             if (request->cancelled) { if (stream) stream->close(); return; }
         }
-        if (!stream || !stream->good()) { request->error = QStringLiteral("Android 按键通道不可用"); return; }
+        if (!stream || !stream->good()) { request->error = QCoreApplication::translate("Kemu", "Android key channel is unavailable"); return; }
         std::string response;
         char ch;
         while (response.size() < 4096 && stream->get(ch)) response.push_back(ch);
         stream->close();
         if (response.find("__KEMU_KEY_EXIT:0") == std::string::npos)
-            request->error = QStringLiteral("Android 未完成静音按键");
+            request->error = QCoreApplication::translate("Kemu", "Android did not complete the mute key event");
     });
     connect(mThread, &QThread::finished, this, [this, request, completed = std::move(completed)] {
         mDeadline.stop();
@@ -80,7 +81,7 @@ bool AndroidMute::send(std::function<void(QString)> completed) {
         QString error;
         {
             std::lock_guard<std::mutex> lock(request->mutex);
-            error = request->cancelled ? QStringLiteral("Android 静音按键超时或已取消") : request->error;
+            error = request->cancelled ? QCoreApplication::translate("Kemu", "Android mute key event timed out or was cancelled") : request->error;
         }
         mRequest.reset();
         completed(error);

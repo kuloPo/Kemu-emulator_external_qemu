@@ -1,4 +1,7 @@
 #include "../src/UpdateController.h"
+#include "../src/UiLanguage.h"
+#include <QComboBox>
+#include <QStackedWidget>
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialog>
@@ -15,6 +18,29 @@
 int main(int argc, char** argv) {
     QApplication app(argc, argv); QTemporaryDir temporary;
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+    using kemu::update::require;
+    for (const auto* locale : {"zh_CN", "zh_SG", "zh_Hans"})
+        require(kemu::defaultUiLanguage(QLocale(locale)) == "zh-CN", "Simplified Chinese detection failed");
+    for (const auto* locale : {"en_US", "ja_JP", "zh_TW", "zh_HK", "zh_Hant", "fr_FR"})
+        require(kemu::defaultUiLanguage(QLocale(locale)) == "en", "Non-Simplified locale must use English");
+    QSettings preferences(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu");
+    require(kemu::initializeUiLanguage(preferences, QLocale("en_US")) == "en", "First launch default failed");
+    require(kemu::initializeUiLanguage(preferences, QLocale("zh_CN")) == "en", "Saved language was overwritten");
+    preferences.remove("general/language");
+    require(kemu::initializeUiLanguage(preferences, QLocale("zh_CN")) == "zh-CN", "Chinese first launch default failed");
+    kemu::setUiLanguage("zh-CN");
+    require(QFile::exists(":/kemu/translations/kemu_zh_CN.qm"), "Embedded translation catalog missing");
+    const auto translatedSettings = QCoreApplication::translate("Kemu", "Settings");
+    require(translatedSettings == QStringLiteral("\u8bbe\u7f6e"), "Qt translator did not load Chinese");
+    require(QCoreApplication::translate("Kemu", "Version %1 is available; %2 files need updating. ")
+        .arg("v0.2.0").arg(3).contains("v0.2.0"), "Translation placeholders were lost");
+    for (int i = 0; i < 3; ++i) {
+        kemu::setUiLanguage("en");
+        require(QCoreApplication::translate("Kemu", "Settings") == "Settings", "English source fallback failed");
+        require(kemu::nativeUiLanguageName("zh-CN") == QStringLiteral("\u7b80\u4f53\u4e2d\u6587"), "Native language name changed");
+        kemu::setUiLanguage("zh-CN");
+        require(QCoreApplication::translate("Kemu", "Settings") == translatedSettings, "Translator reinstall failed");
+    }
     qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8()); bool missing=argc>1 && QString::fromUtf8(argv[1])=="missing";
     if (!missing) { QFile v(temporary.filePath("VERSION.txt")); v.open(QIODevice::WriteOnly); v.write("v0.1.0\n"); }
     bool ready = argc > 1 && QString::fromUtf8(argv[1]) == "ready";
@@ -50,7 +76,7 @@ int main(int argc, char** argv) {
         try {
             using kemu::update::require;
             auto* dialog=window.findChild<QDialog*>("KemuSettings"); require(dialog && dialog->isVisible(),"Settings dialog missing");
-            require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->count()==1,"Update navigation missing");
+            require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->count()==2,"Update navigation missing");
             require(dialog->findChild<QPushButton*>("KemuCheckUpdate")->isEnabled(),"Check update disabled");
             require(!dialog->findChild<QPushButton*>("KemuInstallUpdate") && !dialog->findChild<QPushButton*>("KemuDownloadUpdate"),"Obsolete buttons remain");
             if (ready) {
@@ -94,6 +120,24 @@ int main(int argc, char** argv) {
                 require(font.family() == "Microsoft YaHei", "Settings font fell back to another family");
                 require((font.styleStrategy() & QFont::ForceOutline) && (font.styleStrategy() & QFont::PreferAntialias), "Settings stylesheet reset font rendering strategy");
             }
+            auto* languages = dialog->findChild<QComboBox*>("KemuLanguage");
+            auto* tabs = dialog->findChild<QListWidget*>("KemuSettingsTabs");
+            require(languages && languages->count() == 2, "Language choices missing");
+            require(tabs->currentRow() == 0 && dialog->findChild<QStackedWidget*>()->currentIndex() == 0, "General must be the default page");
+            bool languageChanged = false;
+            controller.languageChanged = [&] { languageChanged = true; };
+            languages->setCurrentIndex(languages->findData("en"));
+            require(languageChanged && dialog->windowTitle() == "Settings" && tabs->item(0)->text() == "General", "Live English switch failed");
+            require(automatic->text() == "Automatic updates", "Update page was not translated");
+            QSettings saved(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu");
+            require(saved.value("general/language").toString() == "en", "Language was not saved");
+            require(kemu::initializeUiLanguage(saved, QLocale("zh_CN")) == "en", "Relaunch must preserve choice");
+            if (argc > 2) require(dialog->grab().save(QString::fromUtf8(argv[2]) + ".english.png"), "Cannot save English UI rendering");
+            languages->setCurrentIndex(languages->findData("zh-CN"));
+            require(kemu::uiLanguage() == "zh-CN" && dialog->windowTitle() != "Settings", "Switch back failed");
+            tabs->setCurrentRow(1);
+            require(dialog->findChild<QStackedWidget*>()->currentIndex() == 1, "Update navigation failed");
+            tabs->setCurrentRow(0);
             if (argc>2) require(dialog->grab().save(QString::fromUtf8(argv[2])),"Cannot save UI rendering");
             std::cout<<"Update settings UI checks passed\n"; app.exit(0);
         } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; app.exit(1); }

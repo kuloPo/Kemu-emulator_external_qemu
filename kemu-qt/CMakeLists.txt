@@ -1,5 +1,37 @@
+# Qt Linguist compiles the maintained TS catalog; embed QM in both the UI and tests.
+# Set KEMU_LRELEASE_EXECUTABLE when Linguist tools are not on PATH.
+find_program(KEMU_LRELEASE_EXECUTABLE NAMES lrelease lrelease-qt6 lrelease6 REQUIRED)
+find_program(KEMU_LUPDATE_EXECUTABLE NAMES lupdate lupdate-qt6 lupdate6)
+set(KEMU_TRANSLATION_TS ${CMAKE_CURRENT_LIST_DIR}/translations/kemu_zh_CN.ts)
+set(KEMU_TRANSLATION_QM ${CMAKE_CURRENT_BINARY_DIR}/kemu_zh_CN.qm)
+add_custom_command(OUTPUT ${KEMU_TRANSLATION_QM}
+    COMMAND ${KEMU_LRELEASE_EXECUTABLE} -nounfinished ${KEMU_TRANSLATION_TS} -qm ${KEMU_TRANSLATION_QM}
+    DEPENDS ${KEMU_TRANSLATION_TS} VERBATIM)
+configure_file(${CMAKE_CURRENT_LIST_DIR}/translations/translations.qrc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/kemu_translations.qrc @ONLY)
+set(KEMU_TRANSLATION_CPP ${CMAKE_CURRENT_BINARY_DIR}/qrc_kemu_translations.cpp)
+add_custom_command(OUTPUT ${KEMU_TRANSLATION_CPP}
+    COMMAND Qt${QT_VERSION_MAJOR}::rcc --name kemu_translations
+        ${CMAKE_CURRENT_BINARY_DIR}/kemu_translations.qrc -o ${KEMU_TRANSLATION_CPP}
+    DEPENDS ${KEMU_TRANSLATION_QM} ${CMAKE_CURRENT_BINARY_DIR}/kemu_translations.qrc VERBATIM)
+add_custom_target(kemu-translations DEPENDS ${KEMU_TRANSLATION_CPP})
+set_source_files_properties(${KEMU_TRANSLATION_CPP} TARGET_DIRECTORY aemu-ui-qt PROPERTIES GENERATED TRUE)
+add_dependencies(aemu-ui-qt kemu-translations)
+set(KEMU_LANGUAGE_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/UiLanguage.cpp ${KEMU_TRANSLATION_CPP})
+if(KEMU_LUPDATE_EXECUTABLE)
+    add_custom_target(kemu-update-translations
+        COMMAND ${KEMU_LUPDATE_EXECUTABLE}
+            ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/src/UiLanguage.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.cpp
+            -no-obsolete -ts ${KEMU_TRANSLATION_TS}
+        VERBATIM)
+endif()
+
 # Built as part of the emulator's existing Qt library and QApplication.
 target_sources(aemu-ui-qt PRIVATE
+    ${KEMU_LANGUAGE_SOURCES}
     ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.h
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.cpp
@@ -74,7 +106,8 @@ if(WINDOWS_MSVC_X86_64)
 endif()
 
 if(WINDOWS_MSVC_X86_64)
-    add_executable(kemu-update-ui-tests tests/UpdateUiTests.cpp src/UpdateController.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    add_dependencies(kemu-update-ui-tests kemu-translations)
     target_compile_features(kemu-update-ui-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-ui-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(kemu-update-ui-tests PRIVATE ${KEMU_JSON})
