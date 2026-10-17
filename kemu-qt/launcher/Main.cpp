@@ -157,8 +157,16 @@ int launch() {
 }
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    try { return launch(); }
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int) {
+    try {
+        DWORD parent = 0;
+        if (swscanf_s(arguments, L"--restart-pid %lu", &parent) == 1 && parent) {
+            Handle previous{OpenProcess(SYNCHRONIZE, FALSE, parent)};
+            if (previous.value && WaitForSingleObject(previous.value, 120000) != WAIT_OBJECT_0)
+                throw std::runtime_error("The emulator did not exit in time to restart");
+        }
+        return launch();
+    }
     catch (const std::exception& error) {
         const std::string text = error.what();
         const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0);

@@ -58,10 +58,12 @@ RuntimeConfig RuntimeConfig::discover(const fs::path& applicationDir, const fs::
     c.images = applicationDir / "system-img";
     c.avdRoot = localAppData / "Kemu/Kemu/avd";
     c.logs = localAppData / "Kemu/Kemu/logs";
+    c.performance = PerformanceConfig::load(c.avdRoot / "performance.ini");
     return c;
 }
 
 void RuntimeConfig::validate() const {
+    if (hostRamGb() < 4) throw std::runtime_error("Kemu requires at least 4 GB of system RAM");
     const auto executable = engine / "qemu/windows-x86_64/qemu-system-x86_64.exe";
     if (!fs::is_regular_file(executable)) throw std::runtime_error("Missing Kemu runtime: " + utf8(executable.wstring()));
     // This launcher uses the emu64xa image profile, including its verified boot metadata.
@@ -122,11 +124,12 @@ void RuntimeConfig::prepare() const {
             {"hw.gpu.mode","auto"}, {"hw.keyboard","yes"}, {"hw.audioOutput","yes"},
             {"tag.id","default"}, {"tag.display","Default Android System"}};
     }
+    const auto size = std::to_string(performance.width) + "x" + std::to_string(performance.height);
     for (const auto& [key, value] : std::map<std::string, std::string>{
-            {"hw.cpu.ncore","8"}, {"hw.ramSize","16384"}, {"hw.lcd.width","1920"},
-            {"hw.lcd.height","1080"}, {"hw.lcd.vsync","60"}, {"hw.initialOrientation","landscape"},
-            {"fastboot.forceColdBoot","yes"}, {"skin.dynamic","no"}, {"skin.name","1920x1080"},
-            {"skin.path","1920x1080"}, {"image.sysdir.1",utf8(images.wstring())}}) values[key] = value;
+            {"hw.cpu.ncore",std::to_string(performance.cores)}, {"hw.ramSize",std::to_string(performance.ramGb * 1024)}, {"hw.lcd.width",std::to_string(performance.width)},
+            {"hw.lcd.height",std::to_string(performance.height)}, {"hw.lcd.vsync",std::to_string(performance.fps)}, {"hw.initialOrientation",performance.portrait ? "portrait" : "landscape"},
+            {"fastboot.forceColdBoot","yes"}, {"skin.dynamic","no"}, {"skin.name",size},
+            {"skin.path",size}, {"image.sysdir.1",utf8(images.wstring())}}) values[key] = value;
     updateIni(ini, values);
     updateIni(avdRoot / "kemu.ini", {{"avd.ini.encoding","UTF-8"}, {"path",utf8(avd.wstring())},
                                      {"path.rel","avd/kemu.avd"}, {"target","android-36"}});
@@ -138,7 +141,7 @@ std::vector<std::wstring> RuntimeConfig::arguments() const {
     const auto features = imageEncryptionEnabled(images) ?
         L"GuestAngle,EncryptUserData" : L"GuestAngle,-EncryptUserData";
     return {L"-avd", L"kemu", L"-sysdir", images.wstring(), L"-port", L"5554",
-            L"-cores", L"8", L"-memory", L"16384", L"-gpu", L"auto", L"-no-snapshot",
+            L"-cores", std::to_wstring(performance.cores), L"-memory", std::to_wstring(performance.ramGb * 1024), L"-gpu", L"auto", L"-no-snapshot",
             L"-no-boot-anim", L"-no-metrics", L"-crash-report-mode", L"never",
             L"-feature", features};
 }

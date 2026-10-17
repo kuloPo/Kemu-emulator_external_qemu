@@ -1,5 +1,6 @@
 #pragma once
 #include <filesystem>
+#include "PerformanceConfig.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -8,6 +9,7 @@ namespace kemu {
 namespace fs = std::filesystem;
 struct RuntimeConfig {
     fs::path engine, images, avdRoot, logs;
+    PerformanceConfig performance;
     static RuntimeConfig discover(const fs::path& applicationDir, const fs::path& localAppData);
     void validate() const;
     void prepare() const;

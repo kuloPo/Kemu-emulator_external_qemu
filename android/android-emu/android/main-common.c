@@ -54,6 +54,7 @@
 struct QAndroidEmulatorWindowAgent;
 #ifdef _WIN32
 #include <process.h>
+#include <windows.h>
 #endif
 #include <stdio.h>                                          // for NULL, fpr...
 #include <stdlib.h>                                         // for exit, strtol
@@ -2157,10 +2158,17 @@ bool emulator_parseCommonCommandLineOptions(int* p_argc,
         if (is_qemu2) {
             char* end = NULL;
             long val = strtol(opts->cores, &end, 10);
-            if (*end != '\0' || val <= 0 || val > 64) {
+            int maxCores = 64;
+#ifdef _WIN32
+            if (isTruthy(getenv("KEMU_UI"))) {
+                maxCores = (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+                if (maxCores < 1) maxCores = 1;
+            }
+#endif
+            if (*end != '\0' || val <= 0 || val > maxCores) {
                 derror("Invalid value for -cores <count> parameter: %s "
-                       "valid values are decimal count between 1 and 64",
-                       opts->cores);
+                       "valid values are decimal count between 1 and %d",
+                       opts->cores, maxCores);
                 return false;
             }
             hw->hw_cpu_ncore = (int)val;

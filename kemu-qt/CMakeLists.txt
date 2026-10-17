@@ -24,6 +24,7 @@ if(KEMU_LUPDATE_EXECUTABLE)
             ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.cpp
             ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
             ${CMAKE_CURRENT_LIST_DIR}/src/UiLanguage.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/src/PerformancePage.h
             ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.cpp
             -no-obsolete -ts ${KEMU_TRANSLATION_TS}
         VERBATIM)
@@ -113,6 +114,11 @@ if(WINDOWS_MSVC_X86_64)
     target_include_directories(kemu-update-ui-tests PRIVATE ${KEMU_JSON})
     target_link_libraries(kemu-update-ui-tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets bcrypt winhttp kemu-update-zip)
     set_target_properties(kemu-update-ui-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+    add_executable(kemu-restart-tests tests/RestartTests.cpp)
+    target_compile_features(kemu-restart-tests PRIVATE cxx_std_17)
+    target_compile_definitions(kemu-restart-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(kemu-restart-tests PRIVATE Qt${QT_VERSION_MAJOR}::Core ws2_32)
+    set_target_properties(kemu-restart-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 endif()
 
 if(WINDOWS_MSVC_X86_64)

@@ -1,5 +1,6 @@
 #include "UpdateController.h"
 #include "UiFont.h"
+#include "PerformancePage.h"
 #include "UiLanguage.h"
 #include <QApplication>
 #include <QBoxLayout>
@@ -49,7 +50,7 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     if (root.isEmpty()) root = qEnvironmentVariable("ANDROID_EMULATOR_LAUNCHER_DIR");
     mRoot = fs::path(root.toStdWString());
     mDialog = new QDialog(parent); mDialog->setObjectName("KemuSettings");
-    mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings")); mDialog->resize(680, 400);
+    mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings")); mDialog->resize(800, 590);
     mDialog->setStyleSheet("QWidget {color:#edf1f6;} QDialog {background:#1b2028;} QListWidget {background:#151b24;border:1px solid #293343;border-radius:10px;padding:8px;outline:0;} QListWidget::item {height:42px;padding-left:16px;border-radius:7px;} QListWidget::item:hover {background:#252f3e;} QListWidget::item:selected {background:#29456b;color:#b8d8ff;} QPushButton {padding:9px 18px;border:1px solid #465468;border-radius:7px;background:#29323e;} QPushButton#KemuCheckUpdate {background:#3478cb;border-color:#448fe8;} QPushButton:hover {background:#3b506c;} QPushButton:disabled {color:#75808f;background:#20262f;} QCheckBox {spacing:9px;} QCheckBox::indicator {width:16px;height:16px;border-radius:4px;border:1px solid #75808f;background:#15191f;} QCheckBox::indicator:checked {background:#508ee0;border-color:#9bc5ff;} QProgressBar {border:0;border-radius:5px;background:#101720;text-align:center;min-height:20px;} QProgressBar::chunk {background:#438fe9;border-radius:5px;}");
     auto* layout = new QHBoxLayout(mDialog); auto* tabs = new QListWidget(mDialog);
     tabs->setObjectName("KemuSettingsTabs"); layout->setContentsMargins(16,16,16,16); layout->setSpacing(24); tabs->setFixedWidth(150); tabs->setFocusPolicy(Qt::NoFocus); tabs->addItem(QCoreApplication::translate("Kemu", "General")); tabs->addItem(QCoreApplication::translate("Kemu", "Updates")); layout->addWidget(tabs);
@@ -85,10 +86,17 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     mCancelButton = new QPushButton(QCoreApplication::translate("Kemu", "Cancel"), page); mCancelButton->setObjectName("KemuCancelUpdate"); mCancelButton->hide(); column->addWidget(mCancelButton, 0, Qt::AlignLeft); column->addStretch();
     connect(mCheck, &QPushButton::clicked, this, [this] { check(); });
     connect(mCancelButton, &QPushButton::clicked, this, [this] { mCancel = true; mCancelButton->setEnabled(false); status(QCoreApplication::translate("Kemu", "Cancelling download...")); });
-    auto retranslate = [this, tabs, languageLabel] {
+    auto* performance = new PerformancePage(pages); pages->insertWidget(1,performance);
+    tabs->insertItem(1,QCoreApplication::translate("Kemu", "Performance"));
+    connect(mDialog, &QDialog::finished, this, [this, performance] {
+        if (!mClosing) performance->closed(mDialog, mWindow, qpath(mRoot), !mBusy);
+    });
+    auto retranslate = [this, tabs, languageLabel, performance] {
+        tabs->item(1)->setText(QCoreApplication::translate("Kemu", "Performance"));
+        performance->retranslate();
         mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings"));
         tabs->item(0)->setText(QCoreApplication::translate("Kemu", "General"));
-        tabs->item(1)->setText(QCoreApplication::translate("Kemu", "Updates"));
+        tabs->item(2)->setText(QCoreApplication::translate("Kemu", "Updates"));
         languageLabel->setText(QCoreApplication::translate("Kemu", "Language"));
         mAutoUpdate->setText(QCoreApplication::translate("Kemu", "Automatic updates"));
         mCheck->setText(QCoreApplication::translate("Kemu", "Check for updates"));
@@ -130,7 +138,7 @@ void UpdateController::work(std::function<void()> task, std::function<void()> fi
         if (!error->isEmpty() || mCancel) {
             mDownloaded = false; mPlan = {};
             try { if (!mStage.empty() && fs::is_directory(mStage)) writeText(mStage / "error.txt", error->toStdString()); } catch (...) {}
-            status(mCancel ? QCoreApplication::translate("Kemu", "Download cancelled. You can check for updates again.") : QCoreApplication::translate("Kemu", "Update could not be completed. Please try again later.\n") + *error); mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(1); showSettings();
+            status(mCancel ? QCoreApplication::translate("Kemu", "Download cancelled. You can check for updates again.") : QCoreApplication::translate("Kemu", "Update could not be completed. Please try again later.\n") + *error); mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); showSettings();
         } else finished();
         refresh();
     });
@@ -339,7 +347,7 @@ void UpdateController::install() {
             require(!fs::exists(mRoot / ".kemu-update-pending"), "Another update is pending");
             fs::remove(mStage / "updater-ready");
             writeJson(mRoot / ".kemu-update-pending", {{"stage",mStage.filename().u8string()}});
-            require(QProcess::startDetached(qpath(mRoot / "KemuUpdater.exe"), {"--apply",qpath(mStage),QString::number(GetCurrentProcessId())}, qpath(mRoot)), "Cannot start updater");
+            require(startDetachedProcess(qpath(mRoot / "KemuUpdater.exe"), {"--apply",qpath(mStage),QString::number(GetCurrentProcessId())}, qpath(mRoot)), "Cannot start updater");
             mBusy = true; status(QCoreApplication::translate("Kemu", "Images and files verified. Handing over to the updater..."));
             auto* timer = new QTimer(this); auto elapsed = std::make_shared<QElapsedTimer>(); elapsed->start();
             connect(timer, &QTimer::timeout, this, [this, timer, elapsed] {

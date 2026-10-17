@@ -1,4 +1,5 @@
 #include "WindowChrome.h"
+#include "WindowSizing.h"
 #include "UiFont.h"
 #include "UiLanguage.h"
 #include "IconButton.h"
@@ -22,6 +23,7 @@
 #include <QScreen>
 #include <QWindow>
 #include "android/console.h"
+#include "host-common/hw-config.h"
 #include "android/emulation/control/globals_agent.h"
 #include "android/emulation/control/adb/AdbInterface.h"
 #include "android/skin/qt/emulator-container.h"
@@ -68,7 +70,6 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
             return new QAccessibleWidget(static_cast<QWidget*>(object), QAccessible::Window);
         return nullptr;
     });
-    container->setMinimumSize(856, 494);
     container->setAlignment(Qt::AlignCenter);
     container->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     container->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -202,9 +203,11 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     connect(&mBootPoll, &QTimer::timeout, this, &WindowChrome::pollBoot);
     mBootPoll.start(100);
     const QRect available = container->screen()->availableGeometry();
-    const int width = qMax(802, qMin(1280, qMin(available.width() - 112,
-                                              (available.height() - 106) * 16 / 9)));
-    container->resize(width + 54, width * 9 / 16 + 42);
+    const auto* hardware = getConsoleAgents()->settings->hw();
+    const auto sizing = windowSizing(
+        QSize(hardware->hw_lcd_width, hardware->hw_lcd_height), available.size());
+    container->setMinimumSize(sizing.minimum);
+    container->resize(sizing.initial);
     container->move(available.center() - container->rect().center());
     layout();
     applyUiFont(mTitle);

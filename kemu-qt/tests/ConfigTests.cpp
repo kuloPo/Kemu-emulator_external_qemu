@@ -123,7 +123,7 @@ int main() {
         std::ofstream(avd / "userdata-qemu.img") << "existing applications";
         config.prepare();
         const auto first = read(ini);
-        for (auto text : {"hw.cpu.ncore=8\n", "hw.ramSize=16384\n", "hw.lcd.width=1920\n",
+        for (auto text : {"hw.lcd.width=1920\n",
                           "hw.lcd.height=1080\n", "hw.lcd.vsync=60\n", "hw.initialOrientation=landscape\n",
                           "disk.dataPartition.size=128G\n", "hw.lcd.density=480\n", "custom.option=keep-me\n"}) {
             require(first.find(text) != std::string::npos, text);
@@ -143,6 +143,30 @@ int main() {
         require(read(config.avdRoot / "kemu.avd/config.ini").find("disk.dataPartition.size=32G") != std::string::npos, "new instance default missing");
         require(kemu::quoteArgument(L"C:\\space path\\") == L"\"C:\\space path\\\\\"", "trailing slash quoting");
         require(kemu::quoteArgument(L"a\"b") == L"\"a\\\"b\"", "embedded quote escaping");
+        const auto performanceFile = config.avdRoot / "performance.ini";
+        std::ofstream(performanceFile) << "[performance]\nwidth=1440\nheight=2560\nfps=144\ncores=1\nramGb=1\nportrait=1\nresolution=2\nfpsMode=3\n";
+        config.performance = kemu::PerformanceConfig::load(performanceFile);
+        config.prepare();
+        const auto changed = read(config.avdRoot / "kemu.avd/config.ini");
+        for (const auto* value : {"hw.cpu.ncore=1\n", "hw.ramSize=4096\n", "hw.lcd.width=1440\n", "hw.lcd.height=2560\n", "hw.lcd.vsync=144\n", "hw.initialOrientation=portrait\n", "skin.name=1440x2560\n"})
+            require(changed.find(value) != std::string::npos, "Performance configuration was not applied");
+        kemu::fs::create_directories(config.images);
+        std::ofstream(config.images / "advancedFeatures.ini") << "EncryptUserData=off\n";
+        const auto args = config.arguments();
+        require(args[7] == L"1" && args[9] == L"4096", "Performance launch arguments were not applied");
+        std::ofstream(performanceFile) << "[performance]\ncores=999999\nramGb=999999\nwidth=0\nfps=0\nresolution=4\nfpsMode=3\nportrait=1\n";
+        const auto limited = kemu::PerformanceConfig::load(performanceFile);
+        require(limited.cores == kemu::hostCpuCount() && limited.ramGb == kemu::hostRamGb() && limited.width == 320 && limited.fps == 1, "Host limits were not enforced");
+        std::ofstream(performanceFile) << "[performance]\nresolution=0\nwidth=999\nheight=999\nfpsMode=0\nfps=999\nramGb=1\nportrait=1\n";
+        const auto preset = kemu::PerformanceConfig::load(performanceFile);
+        require(preset.width==720 && preset.height==1280 && preset.fps==30 && preset.ramGb==4, "Preset settings must normalize before launch");
+        std::ofstream(performanceFile) << "[performance]\nfpsMode=2\nfps=1\ndisplayName=missing-display\n";
+        const auto screen = kemu::PerformanceConfig::load(performanceFile);
+        DEVMODEW display{}; display.dmSize=sizeof(display);
+        if (EnumDisplaySettingsExW(nullptr,ENUM_CURRENT_SETTINGS,&display,0) && display.dmDisplayFrequency>1)
+            require(screen.fps==int(display.dmDisplayFrequency), "Screen FPS must refresh at launch and recover from a removed display");
+        std::ofstream(performanceFile) << "[performance]\nfpsMode=4\nfps=30\n";
+        require(kemu::PerformanceConfig::load(performanceFile).fps==120, "120 FPS preset must resolve before launch");
         const auto resolved = kemu::fs::canonical(temporary);
         require(resolved.parent_path() == kemu::fs::canonical(kemu::fs::temp_directory_path()) &&
                 resolved.filename() == temporary.filename(), "unexpected cleanup path");
