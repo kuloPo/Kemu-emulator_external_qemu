@@ -131,7 +131,7 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
     <message>
         <location filename="../src/UpdateController.cpp" line="100"/>
         <source>Language</source>
-        <translation>语言</translation>
+        <translation>语言 / Language</translation>
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="261"/>
