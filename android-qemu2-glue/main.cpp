@@ -862,7 +862,9 @@ static void initialize_virtio_input_devs(android::ParameterList& args,
             args.add("-device");
             args.add("virtio-tablet-pci");
         } else if (androidHwConfig_isScreenMultiTouch(hw)) {
-            for (int id = 1; id <= VIRTIO_INPUT_MAX_NUM; id++) {
+            const int touchDeviceCount =
+                    fc::isEnabled(fc::MultiDisplay) ? VIRTIO_INPUT_MAX_NUM : 1;
+            for (int id = 1; id <= touchDeviceCount; id++) {
                 args.add("-device");
                 args.add(StringFormat("virtio_input_multi_touch_pci_%d", id)
                                  .c_str());

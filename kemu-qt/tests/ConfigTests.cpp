@@ -1,5 +1,6 @@
 #include "RuntimeConfig.h"
 #include <windows.h>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -62,7 +63,10 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
     require(arguments.size() > 3 && arguments[2] == L"-sysdir" &&
             arguments[3] == (release / "system-img").wstring(), "engine must receive the system-img directory");
     require(arguments[arguments.size() - 2] == L"-feature" &&
-            arguments.back() == L"GuestAngle,-EncryptUserData", "GuestAngle must override the image default");
+            arguments.back() == L"GuestAngle,-EncryptUserData,-MultiDisplay", "single-display features must override the image defaults");
+    const auto selinux = std::find(arguments.begin(), arguments.end(), L"-selinux");
+    require(selinux != arguments.end() && selinux + 1 != arguments.end() &&
+            *(selinux + 1) == L"permissive", "the emulator must start with permissive SELinux");
 
     for (const auto* name : {"build.prop", "advancedFeatures.ini", "kernel_cmdline.txt", "VerifiedBootParams.textproto"}) {
         const auto path = installed.images / name;
@@ -90,13 +94,13 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
         require(rejected, "encrypted image must require encryptionkey.img");
         std::ofstream(installed.images / "encryptionkey.img") << "key fixture";
         installed.validate();
-        require(installed.arguments().back() == L"GuestAngle,EncryptUserData", "encryption arguments must match validation");
+        require(installed.arguments().back() == L"GuestAngle,EncryptUserData,-MultiDisplay", "encryption arguments must match validation");
         kemu::fs::remove(installed.images / "encryptionkey.img");
     }
     for (const auto* setting : {"EncryptUserData=off\n", "# EncryptUserData=on\n", "EncryptUserData=on\nEncryptUserData=off\n"}) {
         std::ofstream(installed.images / "advancedFeatures.ini") << setting;
         installed.validate();
-        require(installed.arguments().back() == L"GuestAngle,-EncryptUserData", "unencrypted images must not require a key");
+        require(installed.arguments().back() == L"GuestAngle,-EncryptUserData,-MultiDisplay", "unencrypted images must not require a key");
     }
     std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData=invalid\n";
     bool invalidEncryption = false;

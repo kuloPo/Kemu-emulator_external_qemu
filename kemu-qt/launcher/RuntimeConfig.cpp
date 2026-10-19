@@ -139,10 +139,11 @@ std::vector<std::wstring> RuntimeConfig::arguments() const {
     // Pin the image's encryption setting so user/environment feature overrides cannot
     // enable encryption after validation skipped its key, or disable an encrypted image.
     const auto features = imageEncryptionEnabled(images) ?
-        L"GuestAngle,EncryptUserData" : L"GuestAngle,-EncryptUserData";
+        L"GuestAngle,EncryptUserData,-MultiDisplay" : L"GuestAngle,-EncryptUserData,-MultiDisplay";
     return {L"-avd", L"kemu", L"-sysdir", images.wstring(), L"-port", L"5554",
             L"-cores", std::to_wstring(performance.cores), L"-memory", std::to_wstring(performance.ramGb * 1024), L"-gpu", L"auto", L"-no-snapshot",
             L"-no-boot-anim", L"-no-metrics", L"-crash-report-mode", L"never",
+            L"-selinux", L"permissive",
             L"-feature", features};
 }
 }  // namespace kemu
