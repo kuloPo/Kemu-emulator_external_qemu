@@ -78,6 +78,7 @@ private:
     ReadPixelsFunc mReadPixels;
     std::unique_ptr<Producer> mVideoProducer;
     size_t mPixelBufferSize;
+    bool mStarted = false;
 
     static std::atomic<uint64_t> sFrameCounter;
 };

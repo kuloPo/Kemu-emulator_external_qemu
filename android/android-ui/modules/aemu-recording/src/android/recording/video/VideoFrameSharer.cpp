@@ -86,11 +86,19 @@ void VideoFrameSharer::frameCallbackForwarder(void* opaque) {
 }
 
 void VideoFrameSharer::start() {
+    if (mStarted) {
+        return;
+    }
+    mStarted = true;
     gpu_register_shared_memory_callback(&VideoFrameSharer::frameCallbackForwarder, this);
 }
 
 void VideoFrameSharer::stop() {
+    if (!mStarted) {
+        return;
+    }
     gpu_unregister_shared_memory_callback(this);
+    mStarted = false;
 }
 
 void VideoFrameSharer::frameAvailable() {

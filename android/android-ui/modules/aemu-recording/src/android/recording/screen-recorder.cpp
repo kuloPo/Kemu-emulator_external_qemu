@@ -494,14 +494,16 @@ const char* start_shared_memory_module(int fps) {
     }
 
     globals.webrtc_module->start();
-    gpu_frame_set_record_mode(true);
     const char* handle = globals.sharedMemoryHandle.c_str();
     D("%s(handle=%s, fps=%d)", __func__, handle, fps);
     return handle;
 }
 
 bool stop_shared_memory_module() {
-    gpu_frame_set_record_mode(false);
+    auto& globals = *sGlobals;
+    if (globals.webrtc_module) {
+        globals.webrtc_module->stop();
+    }
     return true;
 }
 
