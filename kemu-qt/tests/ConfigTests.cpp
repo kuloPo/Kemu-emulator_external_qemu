@@ -1,4 +1,5 @@
 #include "RuntimeConfig.h"
+#include "StorageConfig.h"
 #include <windows.h>
 #include <algorithm>
 #include <fstream>
@@ -11,6 +12,54 @@ static std::string read(const kemu::fs::path& file) {
 }
 static void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+static void checkStorageGrowth(const kemu::fs::path& temporary) {
+    namespace disk = kemu::storage;
+    const auto avd = temporary / "storage";
+    kemu::fs::create_directories(avd / "kemu.avd");
+    const auto image = disk::imagePath(avd);
+    const std::string contents(1024 * 1024, 'A');
+    { std::ofstream out(image,std::ios::binary); out << contents; }
+    disk::requestGrowth(avd,2);
+    require(kemu::fs::file_size(image)==contents.size(),"Request changed a running disk");
+    {
+        disk::Handle reader{CreateFileW(image.c_str(),GENERIC_READ,FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       nullptr,OPEN_EXISTING,0,nullptr)};
+        require(reader.value!=INVALID_HANDLE_VALUE,"Cannot lock storage fixture");
+        bool locked=false;
+        try { disk::applyGrowth(avd); } catch (const std::exception&) { locked=true; }
+        require(locked && kemu::fs::file_size(image)==contents.size(),"Growth must require exclusive access");
+    }
+    require(disk::applyGrowth(avd)==2 && disk::applyGrowth(avd)==2,"Expansion recovery is not idempotent");
+    const auto used=disk::usage(avd);
+    require(used.capacity==2*disk::GiB && used.allocated<2*contents.size(),"Expansion allocated virtual capacity");
+    {
+        std::ifstream in(image,std::ios::binary);
+        std::string prefix(contents.size(),'\0'); in.read(prefix.data(),prefix.size());
+        require(prefix==contents,"Expansion changed existing data");
+        in.seekg(used.capacity-1); char tail=1; in.read(&tail,1);
+        require(in && tail==0,"New sparse tail must read as zero");
+    }
+    require(disk::readRequest(avd).target==used.capacity,"Request disappeared before guest completion");
+    disk::completeGrowth(avd,disk::readRequest(avd));
+    require(!disk::readRequest(avd).target,"Completed expansion remains pending");
+    for (const uint64_t invalid : {uint64_t{0},uint64_t{1},uint64_t{2},disk::MaxGiB+1}) {
+        bool rejected=false;
+        try { disk::requestGrowth(avd,invalid); } catch (const std::exception&) { rejected=true; }
+        require(rejected && !kemu::fs::exists(disk::requestPath(avd)),"Invalid capacity was accepted");
+    }
+    disk::requestGrowth(avd,3);
+    const auto overlay=kemu::fs::path(image.wstring()+L".qcow2");
+    { std::ofstream out(overlay); out << "overlay"; }
+    bool rejected=false;
+    try { disk::applyGrowth(avd); } catch (const std::exception&) { rejected=true; }
+    require(rejected && kemu::fs::file_size(image)==used.capacity,"QCOW2 overlay was ignored");
+    kemu::fs::remove(overlay);
+    { std::ofstream out(disk::requestPath(avd)); out << "1 4096 " << 3*disk::GiB << '\n'; }
+    rejected=false;
+    try { disk::applyGrowth(avd); } catch (const std::exception&) { rejected=true; }
+    require(rejected && kemu::fs::file_size(image)==used.capacity,"Stale request changed the disk");
 }
 
 static void checkEngineDiscovery(const kemu::fs::path& temporary) {
@@ -110,10 +159,19 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
     require(invalidEncryption, "invalid encryption setting must not silently disable key validation");
 }
 
-int main() {
+int main(int argc, char** argv) {
     const auto temporary = kemu::fs::temp_directory_path() / (L"kemu-config-test-" + std::to_wstring(GetCurrentProcessId()));
     try {
+        if (argc == 3 && std::string(argv[1]) == "--apply-growth") {
+            const auto avd = kemu::fs::u8path(argv[2]);
+            const auto capacity = kemu::storage::applyGrowth(avd);
+            require(capacity != 0,"No expansion request for the integration fixture");
+            kemu::updateIni(avd / "kemu.avd/config.ini",{{"disk.dataPartition.size",std::to_string(capacity)+"G"}});
+            std::cout << "Prepared " << capacity << " GiB integration fixture\n";
+            return 0;
+        }
         checkEngineDiscovery(temporary);
+        checkStorageGrowth(temporary);
         kemu::RuntimeConfig config;
         // Exercise Unicode and spaces in both configuration and image paths.
         config.avdRoot = temporary / L"中文 path/avd";
@@ -145,7 +203,7 @@ int main() {
         require(rejected && kemu::fs::is_directory(avd), "directory was overwritten");
         config.avdRoot = temporary / "fresh";
         config.prepare();
-        require(read(config.avdRoot / "kemu.avd/config.ini").find("disk.dataPartition.size=1000G\n") != std::string::npos, "new instance default missing");
+        require(read(config.avdRoot / "kemu.avd/config.ini").find("disk.dataPartition.size=128G\n") != std::string::npos, "new instance default missing");
         require(kemu::quoteArgument(L"C:\\space path\\") == L"\"C:\\space path\\\\\"", "trailing slash quoting");
         require(kemu::quoteArgument(L"a\"b") == L"\"a\\\"b\"", "embedded quote escaping");
         const auto performanceFile = config.avdRoot / "performance.ini";

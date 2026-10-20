@@ -120,7 +120,7 @@ void RuntimeConfig::prepare() const {
     if (!fs::exists(ini)) {
         values = {{"AvdId","kemu"}, {"avd.ini.displayname","Kemu"}, {"avd.ini.encoding","UTF-8"},
             {"PlayStore.enabled","false"}, {"abi.type","x86_64"}, {"hw.cpu.arch","x86_64"},
-            {"disk.dataPartition.size","1000G"}, {"hw.lcd.density","320"}, {"hw.gpu.enabled","yes"},
+            {"disk.dataPartition.size","128G"}, {"hw.lcd.density","320"}, {"hw.gpu.enabled","yes"},
             {"hw.gpu.mode","auto"}, {"hw.keyboard","yes"}, {"hw.audioOutput","yes"},
             {"tag.id","default"}, {"tag.display","Default Android System"}};
     }

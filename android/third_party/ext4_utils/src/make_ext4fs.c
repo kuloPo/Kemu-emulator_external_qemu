@@ -475,11 +475,6 @@ int make_ext4fs_from_dir(const char *filename, const char *dirname,
     reset_ext4fs_info();
     info.len = len;
 
-    if (len > 0 && mountpoint && !strcmp(mountpoint, "data")) {
-        /* Keep 256 KiB per inode when a partial final block group grows. */
-        info.inodes = DIV_ROUND_UP((u64)len, 128ULL * 1024 * 1024) * 512;
-    }
-
     fd = path_open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0644);
     if (fd < 0) {
         error_errno("open");

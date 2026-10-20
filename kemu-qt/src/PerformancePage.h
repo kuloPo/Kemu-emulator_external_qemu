@@ -118,6 +118,13 @@ public:
         };
         resource("KemuCpu",QT_TRANSLATE_NOOP("Kemu","CPU"),1,hostCpuCount(),config.cores,mCores);
         resource("KemuRam",QT_TRANSLATE_NOOP("Kemu","RAM"),4,(std::max)(4,hostRamGb()),config.ramGb,mRam); mRam->setSuffix(" G");
+        auto* storage = new QWidget(this); auto* storageRow = new QHBoxLayout(storage);
+        storageRow->setContentsMargins(0,0,0,0); storageRow->setSpacing(12);
+        mStorage = new QLabel(storage); mStorage->setObjectName("KemuStorageUsage");
+        mExpand = new QPushButton(storage); mExpand->setObjectName("KemuExpandDisk"); mExpand->setEnabled(false);
+        storageRow->addWidget(mStorage,1); storageRow->addWidget(mExpand);
+        row(storage,QT_TRANSLATE_NOOP("Kemu","Storage"));
+        connect(mExpand,&QPushButton::clicked,this,[this] { if (expandStorage) expandStorage(); });
         connect(mResolution,&QButtonGroup::idClicked,this,[this](int id) {
             if (id == 4) { const int width=mCustomWidth, height=mCustomHeight; mWidth->setValue(width); mHeight->setValue(height); }
             updateResolution();
@@ -145,18 +152,28 @@ public:
         updateFps(); mFpsMode->button(3)->setText(QCoreApplication::translate("Kemu","Custom"));
         mOrientation->button(0)->setText(QCoreApplication::translate("Kemu","Landscape"));
         mOrientation->button(1)->setText(QCoreApplication::translate("Kemu","Portrait"));
+        mExpand->setText(QCoreApplication::translate("Kemu","Expand disk"));
     }
-    void closed(QDialog* dialog, QWidget* window, const QString& root, bool canRestart = true) {
+    void setStorage(const QString& text, bool enabled) {
+        mStorage->setText(text); mExpand->setEnabled(enabled);
+    }
+    std::function<void()> expandStorage;
+    bool save(QDialog* dialog) {
         for (auto* input : {mWidth,mHeight,mFps,mCores,mRam}) input->interpretText();
         updateResolution(); updateFps();
         const auto data = contents();
-        if (data == mSaved) return;
+        if (data == mSaved) return true;
         QSaveFile file(mPath);
         if (!QDir().mkpath(QFileInfo(mPath).absolutePath()) || !file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
             UiMessageBox warning(QMessageBox::Warning,QCoreApplication::translate("Kemu","Performance"),QCoreApplication::translate("Kemu","Could not save performance settings. Please try again."),QMessageBox::Ok,dialog);
-            warning.exec(); dialog->show(); return;
+            warning.exec(); dialog->show(); return false;
         }
         mSaved = data;
+        return true;
+    }
+    void closed(QDialog* dialog, QWidget* window, const QString& root, bool canRestart = true) {
+        const auto previous = mSaved;
+        if (!save(dialog) || mSaved == previous) return;
         PerformanceRestartPrompt prompt(QMessageBox::Information,QCoreApplication::translate("Kemu","Restart required"),QCoreApplication::translate("Kemu","Performance settings will take effect after restarting Kemu."),QMessageBox::NoButton,dialog);
         prompt.setObjectName("KemuPerformanceRestart");
         auto* now = prompt.addButton(QCoreApplication::translate("Kemu","Restart now"),QMessageBox::AcceptRole);
@@ -209,6 +226,8 @@ private:
     QButtonGroup *mResolution, *mFpsMode, *mOrientation;
     QSpinBox *mWidth, *mHeight, *mFps, *mCores, *mRam;
     QWidget* mDimensions;
+    QLabel* mStorage;
+    QPushButton* mExpand;
     int mCustomWidth, mCustomHeight, mCustomFps;
 };
 }

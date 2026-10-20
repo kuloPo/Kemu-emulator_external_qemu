@@ -2,6 +2,7 @@
 #include "../src/UiLanguage.h"
 #include "../src/PerformancePage.h"
 #include "../src/WindowSizing.h"
+#include "../launcher/StorageConfig.h"
 #include <QComboBox>
 #include <QStackedWidget>
 #include <QApplication>
@@ -80,6 +81,26 @@ static void checkPerformanceLifecycle(const QString& root) {
 int main(int argc, char** argv) {
     QApplication app(argc, argv); app.setQuitOnLastWindowClosed(false); QTemporaryDir temporary;
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+    if (argc == 5 && QString::fromUtf8(argv[1]) == "growth") {
+        qputenv("ANDROID_AVD_HOME",QByteArray(argv[2]));
+        qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
+        QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",false);
+        const std::filesystem::path avd=std::filesystem::u8path(argv[2]);
+        QWidget window; window.setAttribute(Qt::WA_DontShowOnScreen);
+        kemu::UpdateController controller(&window,[&] { return QString::fromUtf8(argv[3]); },
+                                           [&] { return QString::fromUtf8(argv[4]); });
+        QTimer poll;
+        QObject::connect(&poll,&QTimer::timeout,[&] {
+            if (auto* error=window.findChild<QMessageBox*>()) {
+                std::cerr << error->text().toStdString() << '\n'; error->reject(); app.exit(1);
+            } else if (!std::filesystem::exists(kemu::storage::requestPath(avd))) {
+                std::cout << "Guest filesystem expansion verified and request completed\n"; app.exit(0);
+            }
+        });
+        poll.start(100);
+        QTimer::singleShot(240000,&app,[&] { std::cerr << "Expansion integration test timed out\n"; app.exit(1); });
+        return app.exec();
+    }
     using kemu::update::require;
     for (const auto screen : {QSize(1920,1040),QSize(1280,720),QSize(960,540)}) {
         for (const auto display : {QSize(1920,1080),QSize(1080,1920),QSize(1200,2560)}) {
@@ -114,6 +135,16 @@ int main(int argc, char** argv) {
         require(QCoreApplication::translate("Kemu", "Settings") == translatedSettings, "Translator reinstall failed");
     }
     qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
+    QDir().mkpath(temporary.filePath("kemu.avd"));
+    {
+        QFile image(temporary.filePath("kemu.avd/userdata-qemu.img"));
+        require(image.open(QIODevice::WriteOnly) && image.write(QByteArray(4096,'A'))==4096,
+                "Cannot create storage UI fixture");
+    }
+    const std::filesystem::path storageRoot(temporary.path().toStdWString());
+    kemu::storage::requestGrowth(storageRoot,128);
+    kemu::storage::applyGrowth(storageRoot);
+    kemu::storage::completeGrowth(storageRoot,kemu::storage::readRequest(storageRoot));
     qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8()); bool missing=argc>1 && QString::fromUtf8(argv[1])=="missing";
     if (!missing) { QFile v(temporary.filePath("VERSION.txt")); v.open(QIODevice::WriteOnly); v.write("v0.1.0\n"); }
     bool ready = argc > 1 && QString::fromUtf8(argv[1]) == "ready";
@@ -214,6 +245,24 @@ int main(int argc, char** argv) {
             if (argc>2) require(dialog->grab().save(QString::fromUtf8(argv[2])),"Cannot save UI rendering");
             tabs->setCurrentRow(1);
             require(dialog->findChild<QStackedWidget*>()->currentWidget()->isAncestorOf(dialog->findChild<QSpinBox*>("KemuCpu")), "Performance navigation failed");
+            auto* expand = dialog->findChild<QPushButton*>("KemuExpandDisk");
+            auto* storage = dialog->findChild<QLabel*>("KemuStorageUsage");
+            require(expand && expand->isEnabled() && storage && storage->text()=="0.0G/128G","Storage capacity or allocated size is incorrect");
+            bool confirmed=false;
+            QTimer::singleShot(0,[&] {
+                auto* prompt=dialog->findChild<QDialog*>("KemuStorageExpand");
+                confirmed=prompt && prompt->findChild<QPushButton*>("KemuStorageConfirm");
+                if (prompt) {
+                    auto* size=prompt->findChild<QSpinBox*>("KemuStorageCapacity");
+                    require(size && size->minimum()==129 && size->value()==256,"Expansion must only offer larger capacities");
+                    if (argc>2) prompt->grab().save(QString::fromUtf8(argv[2])+".storage.png");
+                    prompt->reject();
+                }
+            });
+            expand->click();
+            require(confirmed && !kemu::storage::readRequest(storageRoot).target &&
+                    kemu::storage::usage(storageRoot).capacity==128*kemu::storage::GiB,
+                    "Cancelling confirmation changed the disk or queued a restart");
             auto* cpu = dialog->findChild<QSpinBox*>("KemuCpu");
             auto* cpuSlider = dialog->findChild<QSlider*>("KemuCpuSlider");
             auto* ram = dialog->findChild<QSpinBox*>("KemuRam");

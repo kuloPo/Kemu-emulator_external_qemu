@@ -2,9 +2,11 @@
 #include "UiFont.h"
 #include "PerformancePage.h"
 #include "UiLanguage.h"
+#include "../launcher/StorageConfig.h"
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDialog>
 #include <QElapsedTimer>
@@ -43,12 +45,20 @@ protected:
     }
 };
 static QString qpath(const fs::path& path) { return QString::fromStdWString(path.wstring()); }
+static QString rootScript(QString script) {
+    script.replace("'", "'\\''");
+    return "su 0 sh -c '" + script + "'";
+}
 UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history)
     : QObject(parent), mWindow(parent), mAdb(std::move(adb)), mSerial(std::move(serial)), mHistory(std::move(history)) {
     initializeUiTranslations();
+    mWindow->installEventFilter(this);
     auto root = qEnvironmentVariable("KEMU_INSTALL_ROOT");
     if (root.isEmpty()) root = qEnvironmentVariable("ANDROID_EMULATOR_LAUNCHER_DIR");
     mRoot = fs::path(root.toStdWString());
+    auto avd = qEnvironmentVariable("ANDROID_AVD_HOME");
+    if (avd.isEmpty()) avd = qEnvironmentVariable("LOCALAPPDATA") + "/Kemu/Kemu/avd";
+    mAvd = fs::path(avd.toStdWString());
     mDialog = new QDialog(parent); mDialog->setObjectName("KemuSettings");
     mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings")); mDialog->resize(800, 590);
     mDialog->setStyleSheet("QWidget {color:#edf1f6;} QDialog {background:#1b2028;} QListWidget {background:#151b24;border:1px solid #293343;border-radius:10px;padding:8px;outline:0;} QListWidget::item {height:42px;padding-left:16px;border-radius:7px;} QListWidget::item:hover {background:#252f3e;} QListWidget::item:selected {background:#29456b;color:#b8d8ff;} QPushButton {padding:9px 18px;border:1px solid #465468;border-radius:7px;background:#29323e;} QPushButton#KemuCheckUpdate {background:#3478cb;border-color:#448fe8;} QPushButton:hover {background:#3b506c;} QPushButton:disabled {color:#75808f;background:#20262f;} QCheckBox {spacing:9px;} QCheckBox::indicator {width:16px;height:16px;border-radius:4px;border:1px solid #75808f;background:#15191f;} QCheckBox::indicator:checked {background:#508ee0;border-color:#9bc5ff;} QProgressBar {border:0;border-radius:5px;background:#101720;text-align:center;min-height:20px;} QProgressBar::chunk {background:#438fe9;border-radius:5px;}");
@@ -87,13 +97,18 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     connect(mCheck, &QPushButton::clicked, this, [this] { check(); });
     connect(mCancelButton, &QPushButton::clicked, this, [this] { mCancel = true; mCancelButton->setEnabled(false); status(QCoreApplication::translate("Kemu", "Cancelling download...")); });
     auto* performance = new PerformancePage(pages); pages->insertWidget(1,performance);
+    mPerformance = performance;
+    performance->expandStorage = [this] { expandStorage(); };
+    auto* storageTimer = new QTimer(this); storageTimer->setInterval(2000);
+    connect(storageTimer,&QTimer::timeout,this,[this] { if (mDialog->isVisible()) refreshStorage(); });
+    storageTimer->start();
     tabs->insertItem(1,QCoreApplication::translate("Kemu", "Performance"));
     connect(mDialog, &QDialog::finished, this, [this, performance] {
         if (!mClosing) performance->closed(mDialog, mWindow, qpath(mRoot), !mBusy);
     });
     auto retranslate = [this, tabs, languageLabel, performance] {
         tabs->item(1)->setText(QCoreApplication::translate("Kemu", "Performance"));
-        performance->retranslate();
+        performance->retranslate(); refreshStorage();
         mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings"));
         tabs->item(0)->setText(QCoreApplication::translate("Kemu", "General"));
         tabs->item(2)->setText(QCoreApplication::translate("Kemu", "Updates"));
@@ -118,6 +133,17 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     QTimer::singleShot(2000, this, [this] { startup(); });
 }
 UpdateController::~UpdateController() { stop(); }
+bool UpdateController::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == mWindow && event->type() == QEvent::Close && mGrowingStorage) {
+        static_cast<QCloseEvent*>(event)->ignore();
+        UiMessageBox prompt(QMessageBox::Information,QCoreApplication::translate("Kemu","Storage"),
+            QCoreApplication::translate("Kemu","Disk expansion is in progress. Please wait before closing Kemu."),
+            QMessageBox::Ok,mDialog);
+        prompt.exec();
+        return true;
+    }
+    return QObject::eventFilter(watched,event);
+}
 void UpdateController::stop() { mClosing = true; mCancel = true; if (mWorker) { mWorker->wait(); delete mWorker; mWorker = nullptr; } }
 void UpdateController::showSettings() { mDialog->show(); mDialog->raise(); mDialog->activateWindow(); }
 void UpdateController::status(const QString& text) {
@@ -125,17 +151,135 @@ void UpdateController::status(const QString& text) {
     else mStatus->setText(text);
 }
 void UpdateController::refresh() {
-    mCheck->setEnabled(!mBusy);
+    std::error_code error;
+    const bool pending = fs::exists(storage::requestPath(mAvd),error);
+    mCheck->setEnabled(!mBusy && !pending && !error);
     mDialog->findChild<QComboBox*>("KemuLanguage")->setEnabled(!mBusy);
     if (!mBusy) { mProgress->hide(); mCancelButton->hide(); }
+    refreshStorage();
 }
-void UpdateController::work(std::function<void()> task, std::function<void()> finished) {
+void UpdateController::refreshStorage() {
+    try {
+        const auto used = storage::usage(mAvd);
+        QString text = QString("%1G/%2G")
+            .arg(double(used.allocated) / storage::GiB,0,'f',1)
+            .arg(double(used.capacity) / storage::GiB,0,'f',used.capacity % storage::GiB ? 1 : 0);
+        const auto pending = storage::readRequest(mAvd);
+        if (pending.target)
+            text += QCoreApplication::translate("Kemu"," (expanding to %1G)").arg(pending.target / storage::GiB);
+        mPerformance->setStorage(text,!mBusy && !mClosing &&
+            (pending.target || used.capacity / storage::GiB < storage::MaxGiB));
+    } catch (...) {
+        mPerformance->setStorage(QCoreApplication::translate("Kemu","Storage unavailable"),false);
+    }
+}
+void UpdateController::storageFailure(const QString& error) {
+    mGrowingStorage = false;
+    mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(1);
+    showSettings();
+    UiMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Storage"),
+        QCoreApplication::translate("Kemu","Could not complete disk expansion. Your data has not been reset. Restart Kemu to retry.") +
+        "\n\n" + error,QMessageBox::Ok,mDialog);
+    prompt.exec();
+}
+void UpdateController::expandStorage() {
+    if (mBusy || mClosing) return;
+    try {
+        const auto used = storage::usage(mAvd);
+        const auto pending = storage::readRequest(mAvd);
+        QDialog prompt(mDialog); prompt.setObjectName("KemuStorageExpand");
+        prompt.setWindowTitle(QCoreApplication::translate("Kemu","Expand disk"));
+        auto* layout = new QVBoxLayout(&prompt);
+        auto* description = new QLabel(QCoreApplication::translate("Kemu",
+            "Kemu will restart to expand the disk. Existing data will be kept. The disk cannot be made smaller."),&prompt);
+        description->setWordWrap(true); layout->addWidget(description);
+        auto* capacity = new QSpinBox(&prompt); capacity->setObjectName("KemuStorageCapacity");
+        capacity->setSuffix(" G"); capacity->setKeyboardTracking(false);
+        capacity->setStyleSheet("QSpinBox {background:#29323e;color:#edf1f6;border:1px solid #465468;border-radius:6px;padding:7px;}");
+        const int minimum = int(used.capacity / storage::GiB) + 1;
+        capacity->setRange(pending.target ? int(pending.target / storage::GiB) : minimum,int(storage::MaxGiB));
+        capacity->setValue(pending.target ? int(pending.target / storage::GiB) :
+            (std::min)(int(storage::MaxGiB),(std::max)(minimum,int(used.capacity / storage::GiB) * 2)));
+        capacity->setEnabled(!pending.target); layout->addWidget(capacity);
+        auto* buttons = new QHBoxLayout;
+        auto* cancel = new QPushButton(QCoreApplication::translate("Kemu","Cancel"),&prompt);
+        auto* confirm = new QPushButton(QCoreApplication::translate("Kemu","Expand and restart"),&prompt);
+        buttons->addStretch(); buttons->addWidget(cancel); buttons->addWidget(confirm);
+        confirm->setObjectName("KemuStorageConfirm"); cancel->setDefault(true); confirm->setAutoDefault(false);
+        connect(confirm,&QPushButton::clicked,&prompt,&QDialog::accept);
+        connect(cancel,&QPushButton::clicked,&prompt,&QDialog::reject);
+        layout->addLayout(buttons); prompt.resize(440,prompt.sizeHint().height()); applyUiFont(&prompt);
+        if (prompt.exec() != QDialog::Accepted || !mPerformance->save(mDialog)) return;
+        const auto target = uint64_t(capacity->value());
+        const auto adb = mAdb(), serial = mSerial();
+        work([this,adb,serial] {
+            adbCommand(adb,serial,{"shell",rootScript(
+                "set -eu\n"
+                "test -x /system/bin/resize2fs\n"
+                "test \"$(id -u)\" = 0\n"
+                "awk '$2 == \"/data\" && $3 == \"ext4\" { found=1 } END { exit !found }' /proc/mounts\n")},15000);
+        },[this,target,pending] {
+            bool created = false;
+            try {
+                if (!pending.target) { storage::requestGrowth(mAvd,target); created = true; }
+                if (!startDetachedProcess(qpath(mRoot / "Kemu.exe"),
+                        {"--restart-pid",QString::number(GetCurrentProcessId())},qpath(mRoot))) {
+                    if (created) fs::remove(storage::requestPath(mAvd));
+                    throw std::runtime_error("Cannot start the restart helper.");
+                }
+                mClosing = true; mWindow->close();
+            } catch (const std::exception& error) { storageFailure(QString::fromUtf8(error.what())); }
+        },[this](const QString& error) { storageFailure(error); });
+    } catch (const std::exception& error) { storageFailure(QString::fromUtf8(error.what())); }
+}
+void UpdateController::finishStorageGrowth() {
+    try {
+        const auto request = storage::readRequest(mAvd);
+        if (!request.target) return;
+        require(storage::usage(mAvd).capacity == request.target,
+                "Restart Kemu to apply the requested data image size.");
+        const auto adb = mAdb(), serial = mSerial();
+        mGrowingStorage = true;
+        work([this,adb,serial,request] {
+            QElapsedTimer boot; boot.start();
+            bool ready = false;
+            while (!mCancel && boot.elapsed() < 180000) {
+                try {
+                    ready = adbCommand(adb,serial,{"shell","getprop","sys.boot_completed"},5000).trimmed() == "1";
+                    if (ready) break;
+                } catch (const std::exception&) {}
+                QThread::msleep(1000);
+            }
+            require(ready && !mCancel,"Android did not finish starting for disk expansion.");
+            const auto script = QString(
+                "set -eu\n"
+                "dev=$(awk '$2 == \"/data\" && $3 == \"ext4\" { print $1; exit }' /proc/mounts)\n"
+                "case \"$dev\" in /dev/block/*) ;; *) exit 1 ;; esac\n"
+                "test \"$(blockdev --getsize64 \"$dev\")\" = %1\n"
+                "/system/bin/resize2fs \"$dev\"\n"
+                "set -- $(od -An -tu4 -j1028 -N4 \"$dev\")\n"
+                "test \"$#\" = 1\n"
+                "test \"$1\" = %2\n"
+                "sync\n").arg(request.target).arg(request.target / 4096);
+            // Once resizing starts, wait for it even if the window is closing.
+            adbCommand(adb,serial,{"shell",rootScript(script)},10*60*1000,false);
+            storage::completeGrowth(mAvd,request);
+        },[this] {
+            mGrowingStorage = false;
+            refreshStorage();
+            QTimer::singleShot(0,this,[this] { startup(); });
+        },[this](const QString& error) { storageFailure(error); });
+    } catch (const std::exception& error) { storageFailure(QString::fromUtf8(error.what())); }
+}
+void UpdateController::work(std::function<void()> task, std::function<void()> finished,
+                            std::function<void(const QString&)> failed) {
     if (mBusy || mClosing) return;
     mBusy = true; mCancel = false; refresh(); auto error = std::make_shared<QString>();
     mWorker = QThread::create([task, error] { try { task(); } catch (const std::exception& e) { *error = QString::fromUtf8(e.what()); } });
-    connect(mWorker, &QThread::finished, this, [this, error, finished] {
+    connect(mWorker, &QThread::finished, this, [this, error, finished, failed] {
         if (mClosing) return; mWorker->deleteLater(); mWorker = nullptr; mBusy = false;
         if (!error->isEmpty() || mCancel) {
+            if (failed) { failed(*error); refresh(); return; }
             mDownloaded = false; mPlan = {};
             try { if (!mStage.empty() && fs::is_directory(mStage)) writeText(mStage / "error.txt", error->toStdString()); } catch (...) {}
             status(mCancel ? QCoreApplication::translate("Kemu", "Download cancelled. You can check for updates again.") : QCoreApplication::translate("Kemu", "Update could not be completed. Please try again later.\n") + *error); mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); showSettings();
@@ -146,12 +290,13 @@ void UpdateController::work(std::function<void()> task, std::function<void()> fi
 }
 void UpdateController::startup() {
     if (mBusy || mDownloaded) return;
+    if (fs::exists(storage::requestPath(mAvd))) { finishStorageGrowth(); return; }
     try { mVersion->setText(QCoreApplication::translate("Kemu", "Current version: ") + QString::fromStdString(readVersion(mRoot))); }
     catch (...) { mVersion->setText(QCoreApplication::translate("Kemu", "Current version: Unknown")); status(QString()); return; }
     if (mAutoUpdate->isChecked() || fs::exists(mRoot / ".kemu-update")) check(true);
 }
 void UpdateController::check(bool automatic) {
-    if (mBusy) return;
+    if (mBusy || fs::exists(storage::requestPath(mAvd))) return;
     try { readVersion(mRoot); } catch (...) {
         mVersion->setText(QCoreApplication::translate("Kemu", "Current version: Unknown"));
         status(QString());
@@ -261,13 +406,13 @@ void UpdateController::offerInstall() {
     prompt.addButton(QCoreApplication::translate("Kemu", "Later"), QMessageBox::RejectRole);
     prompt.exec(); if (prompt.clickedButton() == now) install();
 }
-QByteArray UpdateController::adbCommand(const QString& adb, const QString& serial, const QStringList& args, int timeout) {
+QByteArray UpdateController::adbCommand(const QString& adb, const QString& serial, const QStringList& args, int timeout, bool cancellable) {
     require(!adb.isEmpty() && serial.startsWith("emulator-"), "ADB for this emulator is unavailable");
     QProcess process; process.setProcessChannelMode(QProcess::MergedChannels); process.start(adb, QStringList{"-s", serial} + args);
     require(process.waitForStarted(10000), "Cannot start ADB"); QElapsedTimer timer; timer.start(); QByteArray output;
     while (!process.waitForFinished(100)) {
         output += process.readAll(); if (output.size() > 4*1024*1024) output = output.right(4*1024*1024);
-        if (mCancel || timer.elapsed() > timeout) { process.kill(); process.waitForFinished(5000); throw std::runtime_error("ADB operation cancelled or timed out"); }
+        if ((cancellable && mCancel) || timer.elapsed() > timeout) { process.kill(); process.waitForFinished(5000); throw std::runtime_error("ADB operation cancelled or timed out"); }
     }
     output += process.readAll(); require(process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0, "ADB failed: " + output.toStdString()); return output;
 }

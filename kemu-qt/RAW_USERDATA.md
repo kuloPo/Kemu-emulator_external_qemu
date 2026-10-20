@@ -4,7 +4,7 @@ Kemu opens `avd/kemu.avd/userdata-qemu.img` directly as a writable RAW block
 device. Userdata uses ext4 with Android encryption enabled.
 `system-img/userdata.img` remains the initialization template.
 
-New Kemu instances default to `1000G` (1000 GiB). Existing configured capacities
+New Kemu instances default to `128G` (128 GiB). Existing configured capacities
 are preserved. Creating a sparse data image does not require free host space
 equal to its virtual capacity. Startup does not enforce a virtual-capacity
 space check or a minimum-free-space threshold on the host.
@@ -17,14 +17,8 @@ configured virtual capacity. Initialization happens in `userdata-qemu.img.raw-in
 only a completed image replaces the live path. Windows requires a filesystem
 supporting sparse files, such as NTFS.
 
-Userdata uses 256 KiB per inode (512 inodes per 128 MiB ext4 block group).
-The AOSP emu64xa template reserves 2560 inodes across its five block groups;
-the host directory formatter uses the same density. Expansion to 1000 GiB
-provides 4,096,000 inodes, with about 1.95 GiB of inode tables when using the
-template's 512-byte inodes. Files and directories share this finite inode budget.
-Existing filesystems retain their inode density and require a data reset to
-adopt a rebuilt template. Keep the rebuilt `system-img/userdata.img` with the
-runtime; copying an older template restores that template's original density.
+Image packaging copies the original AOSP userdata template without changing
+its inode density. Existing filesystems retain their original inode layout.
 
 ## Existing instances
 
@@ -43,16 +37,24 @@ template. Kemu does not automatically reset existing user data.
 - Normal cold boots, application data, Android encryption and exclusive access.
 - Sparse RAW initialization, including trailing zero ranges.
 - Growth of an existing unencrypted ext4 image.
+- Confirmed expansion of encrypted userdata through Settings > Performance.
 - System-image version changes without resetting the encryption-key overlay.
 
 Snapshots, snapshot imports and read-only shared instances are disabled for RAW
 userdata. Live snapshot save/load requests are rejected. Legacy
 `userdata.useQcow2` configuration is ignored; `-qcow2-for-userdata` is rejected.
 
-Shrinking an existing image and host-side growth of encrypted userdata are
-rejected before changing its size. Retain its current capacity or explicitly
-reset it at the desired capacity. Supporting encrypted growth requires resizing
-the guest's encryption mapping and filesystem together.
+Settings > Performance shows the data image's allocated host space and virtual
+capacity. Expand disk asks for a larger capacity and confirmation to restart.
+The launcher waits for the old emulator to exit, extends the sparse RAW file
+under exclusive access, and updates the AVD capacity. Android recreates its
+encryption mapping for the larger block device on boot, then Kemu runs Android's
+resize2fs on the mounted data filesystem. The expansion request remains until
+the guest filesystem size is verified; a later launch can retry an interrupted
+operation. The Android image must provide root shell access and resize2fs.
+
+Shrinking remains unsupported. Direct engine startup still rejects host-side
+resizing of an encrypted image; use the confirmed Kemu expansion flow.
 
 Sparse allocation does not automatically reclaim deleted guest files.
 Host TRIM/hole-punching support is a separate requirement. Copy and backup tools

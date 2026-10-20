@@ -383,6 +383,38 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <source>CPU</source>
         <translation>CPU</translation>
     </message>
+    <message>
+        <source>Storage</source>
+        <translation>存储</translation>
+    </message>
+    <message>
+        <source>Expand disk</source>
+        <translation>扩大磁盘</translation>
+    </message>
+    <message>
+        <source>Storage unavailable</source>
+        <translation>无法读取存储信息</translation>
+    </message>
+    <message>
+        <source> (expanding to %1G)</source>
+        <translation>（正在扩容至 %1G）</translation>
+    </message>
+    <message>
+        <source>Kemu will restart to expand the disk. Existing data will be kept. The disk cannot be made smaller.</source>
+        <translation>Kemu 将重启以扩大磁盘。现有数据会保留，扩容后无法缩小磁盘。</translation>
+    </message>
+    <message>
+        <source>Expand and restart</source>
+        <translation>扩容并重启</translation>
+    </message>
+    <message>
+        <source>Could not complete disk expansion. Your data has not been reset. Restart Kemu to retry.</source>
+        <translation>未能完成磁盘扩容，现有数据未被清除。请重启 Kemu 后重试。</translation>
+    </message>
+    <message>
+        <source>Disk expansion is in progress. Please wait before closing Kemu.</source>
+        <translation>正在扩大磁盘，请等待完成后再关闭 Kemu。</translation>
+    </message>
 </context>
 <context>
     <name>LanguageNames</name>

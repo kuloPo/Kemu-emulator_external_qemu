@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include "RuntimeConfig.h"
+#include "StorageConfig.h"
 #include <algorithm>
 #include <cwctype>
 #include <stdexcept>
@@ -82,6 +83,10 @@ int launch() {
     config.validate();
     checkPorts();
     config.prepare();
+    if (const auto capacity = kemu::storage::applyGrowth(config.avdRoot)) {
+        kemu::updateIni(config.avdRoot / "kemu.avd/config.ini",
+                        {{"disk.dataPartition.size", std::to_string(capacity) + "G"}});
+    }
     setEnv(L"ANDROID_AVD_HOME", config.avdRoot.wstring());
     setEnv(L"ANDROID_EMULATOR_HOME", (config.avdRoot / "emulator-home").wstring());
     setEnv(L"ANDROID_EMULATOR_LAUNCHER_DIR", config.engine.wstring());

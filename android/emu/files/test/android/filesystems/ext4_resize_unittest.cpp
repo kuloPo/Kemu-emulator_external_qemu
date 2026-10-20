@@ -16,7 +16,6 @@
 #include "android/base/testing/Utils.h"
 #include "android/filesystems/ext4_utils.h"
 #include "android/filesystems/sparse_file.h"
-#include "android/utils/file_io.h"
 
 #include <gtest/gtest.h>
 
@@ -128,22 +127,6 @@ TEST_F(Ext4ResizeTest, sparseInitializationAndGrowth) {
     const int64_t capacity = 1024LL * 1024 * 1024;
     ASSERT_EQ(0, resizeExt4Partition(mFilePath.c_str(), capacity));
     expectValidImage(capacity);
-    FILE* file = android_fopen(mFilePath.c_str(), "rb");
-    ASSERT_NE(nullptr, file);
-    unsigned char superblock[1024];
-    const bool read = fseek(file, 1024, SEEK_SET) == 0 &&
-                      fread(superblock, 1, sizeof(superblock), file) ==
-                              sizeof(superblock);
-    fclose(file);
-    ASSERT_TRUE(read);
-    const auto field = [&](size_t offset) {
-        return uint32_t(superblock[offset]) |
-               (uint32_t(superblock[offset + 1]) << 8) |
-               (uint32_t(superblock[offset + 2]) << 16) |
-               (uint32_t(superblock[offset + 3]) << 24);
-    };
-    EXPECT_EQ(512U, field(40));  // Inodes per 128 MiB block group.
-    EXPECT_EQ(capacity / (256 * 1024), field(0));
 #ifdef _WIN32
     const auto path = std::filesystem::u8path(mFilePath);
     EXPECT_NE(0, GetFileAttributesW(path.c_str()) & FILE_ATTRIBUTE_SPARSE_FILE);
