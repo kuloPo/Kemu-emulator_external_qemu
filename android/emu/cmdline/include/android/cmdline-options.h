@@ -92,7 +92,7 @@ OPT_FLAG ( no_snapshot,    "perform a full boot and do not auto-save, but qemu v
 OPT_FLAG ( no_snapshot_save, "do not auto-save to snapshot on exit: abandon changed state" )
 OPT_FLAG ( no_snapshot_load, "do not auto-start from snapshot: perform a full boot" )
 OPT_FLAG ( force_snapshot_load, "force starting from snapshot: exit emulator if loading from snapshot fails" )
-OPT_FLAG(qcow2_for_userdata, "use qcow2 for userdata")
+OPT_FLAG(qcow2_for_userdata, "unsupported: Kemu userdata uses RAW")
 OPT_FLAG ( snapshot_list,  "show a list of available snapshots" )
 OPT_FLAG ( no_snapshot_update_time, "do not try to correct snapshot time on restore" )
 OPT_FLAG ( wipe_data, "reset the user data image (copy it from initdata)" )

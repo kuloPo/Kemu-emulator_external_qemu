@@ -684,8 +684,7 @@ help_force_snapshot_load(stralloc_t*  out)
 }
 
 static void help_qcow2_for_userdata(stralloc_t* out) {
-    PRINTF("  Use Qcow2 format for userdata (instead of the default "
-           "ext4).\n\n");
+    PRINTF("  Unsupported in Kemu. Userdata uses a single RAW image.\n\n");
 }
 
 static void

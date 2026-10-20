@@ -128,7 +128,8 @@ void RuntimeConfig::prepare() const {
     for (const auto& [key, value] : std::map<std::string, std::string>{
             {"hw.cpu.ncore",std::to_string(performance.cores)}, {"hw.ramSize",std::to_string(performance.ramGb * 1024)}, {"hw.lcd.width",std::to_string(performance.width)},
             {"hw.lcd.height",std::to_string(performance.height)}, {"hw.lcd.vsync",std::to_string(performance.fps)}, {"hw.initialOrientation",performance.portrait ? "portrait" : "landscape"},
-            {"fastboot.forceColdBoot","yes"}, {"skin.dynamic","no"}, {"skin.name",size},
+            {"fastboot.forceColdBoot","yes"}, {"userdata.useQcow2","no"},
+            {"skin.dynamic","no"}, {"skin.name",size},
             {"skin.path",size}, {"image.sysdir.1",utf8(images.wstring())}}) values[key] = value;
     updateIni(ini, values);
     updateIni(avdRoot / "kemu.ini", {{"avd.ini.encoding","UTF-8"}, {"path",utf8(avd.wstring())},

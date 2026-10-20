@@ -15,12 +15,18 @@
 #include "android/base/testing/TestTempDir.h"
 #include "android/base/testing/Utils.h"
 #include "android/filesystems/ext4_utils.h"
+#include "android/filesystems/sparse_file.h"
 
 #include <gtest/gtest.h>
 
 #include <memory>
 #include <string>
 #include <string_view>
+#include <filesystem>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 using android::base::System;
 using android::base::TestSystem;
@@ -111,4 +117,21 @@ TEST_F(Ext4ResizeTest, contract) {
     static const int64_t kSmallerSize = 201 * 1024 * 1024;
     EXPECT_EQ(0, resizeExt4Partition(mFilePath.c_str(), kSmallerSize));
     expectValidImage(kSmallerSize);
+}
+
+TEST_F(Ext4ResizeTest, sparseInitializationAndGrowth) {
+    SKIP_TEST_ON_WINE();
+    ASSERT_TRUE(android_createSparseFile(mFilePath.c_str()));
+    ASSERT_EQ(0, android_createEmptyExt4Image(mFilePath.c_str(),
+                                            kInitialImageSize, "data"));
+    const int64_t capacity = 1024LL * 1024 * 1024;
+    ASSERT_EQ(0, resizeExt4Partition(mFilePath.c_str(), capacity));
+    expectValidImage(capacity);
+#ifdef _WIN32
+    const auto path = std::filesystem::u8path(mFilePath);
+    EXPECT_NE(0, GetFileAttributesW(path.c_str()) & FILE_ATTRIBUTE_SPARSE_FILE);
+    DWORD high = 0;
+    const DWORD low = GetCompressedFileSizeW(path.c_str(), &high);
+    EXPECT_LT((uint64_t(high) << 32) | low, capacity / 2);
+#endif
 }

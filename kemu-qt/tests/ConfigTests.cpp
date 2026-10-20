@@ -129,7 +129,8 @@ int main() {
         const auto first = read(ini);
         for (auto text : {"hw.lcd.width=1920\n",
                           "hw.lcd.height=1080\n", "hw.lcd.vsync=60\n", "hw.initialOrientation=landscape\n",
-                          "disk.dataPartition.size=128G\n", "hw.lcd.density=480\n", "custom.option=keep-me\n"}) {
+                          "disk.dataPartition.size=128G\n", "userdata.useQcow2=no\n",
+                          "hw.lcd.density=480\n", "custom.option=keep-me\n"}) {
             require(first.find(text) != std::string::npos, text);
         }
         require(first.find("hw.cpu.ncore=", first.find("hw.cpu.ncore=") + 1) == std::string::npos, "duplicate CPU setting");

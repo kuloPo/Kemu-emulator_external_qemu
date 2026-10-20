@@ -311,11 +311,29 @@ static bool qemu_snapshot_last_loaded(void* opaque,
     return true;
 }
 
+static bool snapshotSupportsUserData(void* opaque,
+                                     LineConsumerCallback errConsumer) {
+    BlockBackend* userdata = blk_by_name("userdata");
+    BlockDriverState* image = userdata ? blk_bs(userdata) : nullptr;
+    if (image && !strcmp(bdrv_get_format_name(image), "raw")) {
+        if (errConsumer) {
+            const std::string message =
+                    "Snapshots are unsupported with single RAW userdata.\n";
+            errConsumer(opaque, message.c_str(), message.size());
+        }
+        return false;
+    }
+    return true;
+}
+
 static bool qemu_snapshot_save(const char* name,
                                void* opaque,
                                LineConsumerCallback errConsumer) {
-    // TODO: remove this or add the same safety checks as Quickboot::save
     android::RecursiveScopedVmLock vmlock;
+    if (!snapshotSupportsUserData(opaque, errConsumer)) {
+        return false;
+    }
+    // TODO: remove this or add the same safety checks as Quickboot::save
     if (is_snapshot_save_skipped()) {
         std::string err =
                 std::string("Snapshot cannot be saved. Reason: ") +
@@ -608,6 +626,9 @@ static bool qemu_snapshot_load(const char* name,
                                void* opaque,
                                LineConsumerCallback errConsumer) {
     android::RecursiveScopedVmLock vmlock;
+    if (!snapshotSupportsUserData(opaque, errConsumer)) {
+        return false;
+    }
 
     bool wasVmRunning = runstate_is_running() != 0;
 

@@ -158,16 +158,18 @@ static bool parseQemuOptForQcow2(bool wipeData) {
             /* If the path is NULL or empty, just ignore it.*/
             continue;
         }
-        char* image_basename = path_basename(backing_image_path);
         char* qcow2_path_buffer = nullptr;
         const char qcow2_suffix[] = "." QCOW2_SUFFIX;
-        if (!qcow2_image_path ||
+        const char* format = opts ? qemu_opt_get(opts, "format") : nullptr;
+        if ((format && !strcmp(format, "raw")) || !qcow2_image_path ||
+            strlen(qcow2_image_path) < strlen(qcow2_suffix) ||
             strcmp(qcow2_suffix, qcow2_image_path +
                                         strlen(qcow2_image_path) -
                                         strlen(qcow2_suffix))) {
             // We are not using qcow2
             continue;
         }
+        char* image_basename = path_basename(backing_image_path);
         if (!android::base::PathUtils::isAbsolute(qcow2_image_path)) {
             qcow2_path_buffer = path_join(avd_data_dir, qcow2_image_path);
             // bug: 130353176
@@ -181,7 +183,7 @@ static bool parseQemuOptForQcow2(bool wipeData) {
 
         Error* img_creation_error = NULL;
         if (!path_exists(qcow2_image_path) || wipeData ||
-            reset_version_number_cache) {
+            (reset_version_number_cache && p < 2)) {
             const char* fmt = "raw";
             uint8_t buf[BLOCK_PROBE_BUF_SIZE];
             BlockDriver* drv;

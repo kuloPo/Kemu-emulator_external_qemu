@@ -19,6 +19,7 @@ android_add_library(
       android/filesystems/partition_config.cpp
       android/filesystems/partition_types.cpp
       android/filesystems/ramdisk_extractor.cpp
+      android/filesystems/sparse_file.cpp
       android/qt/qt_path.cpp
       android/qt/qt_setup.cpp
       android/uncompress.cpp
@@ -47,6 +48,7 @@ if(ANDROID_EMULATOR_BUILD)
         android/filesystems/partition_config_unittest.cpp
         android/filesystems/partition_types_unittest.cpp
         android/filesystems/ramdisk_extractor_unittest.cpp
+        android/filesystems/sparse_file_unittest.cpp
         android/filesystems/testing/TestSupport.cpp
         android/qt/qt_path_unittest.cpp
         android/qt/qt_setup_unittest.cpp

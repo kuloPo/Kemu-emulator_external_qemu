@@ -21,8 +21,6 @@
 #include "android-qemu2-glue/base/files/KernelCmdLineLoader.h"
 #include "android-qemu2-glue/qemu-console-factory.h"
 #include "android/android.h"
-#include "android/avd/BugreportInfo.h"
-#include "android/base/files/IniFile.h"
 #include "android/base/system/System.h"
 #include "android/boot-properties.h"
 #include "android/bootconfig.h"
@@ -46,6 +44,7 @@
 #include "android/error-messages.h"
 #include "android/filesystems/ext4_resize.h"
 #include "android/filesystems/ext4_utils.h"
+#include "android/filesystems/sparse_file.h"
 #include "android/help.h"
 #include "android/hw-sensors.h"
 #include "android/kernel/kernel_utils.h"
@@ -476,24 +475,31 @@ static void prepareDataFolder(const char* destDirectory,
 
 static bool creatUserDataExt4Img(AndroidHwConfig* hw,
                                  const char* dataDirectory) {
+    if (!android_createSparseFile(hw->disk_dataPartition_path)) {
+        derror("Could not create sparse userdata image: %s",
+               hw->disk_dataPartition_path);
+        return false;
+    }
     std::string empty_data_path =
             PathUtils::join(dataDirectory, "empty_data_disk");
     const bool shouldUseEmptyDataImg = path_exists(empty_data_path.c_str()) &&
                                        !(android_foldable_is_pixel_fold());
+    int result;
     if (shouldUseEmptyDataImg) {
-        android_createEmptyExt4Image(
+        result = android_createEmptyExt4Image(
                 hw->disk_dataPartition_path,
                 getConsoleAgents()->settings->hw()->disk_dataPartition_size,
                 "data");
     } else {
-        android_createExt4ImageFromDir(
+        result = android_createExt4ImageFromDir(
                 hw->disk_dataPartition_path, dataDirectory,
                 getConsoleAgents()->settings->hw()->disk_dataPartition_size,
                 "data");
     }
     // Check if creating user data img succeed
     System::FileSize diskSize;
-    if (System::get()->pathFileSize(hw->disk_dataPartition_path, &diskSize) &&
+    if (result == 0 &&
+        System::get()->pathFileSize(hw->disk_dataPartition_path, &diskSize) &&
         diskSize > 0) {
         return true;
     } else {
@@ -502,74 +508,9 @@ static bool creatUserDataExt4Img(AndroidHwConfig* hw,
     }
 }
 
-static void replaceDefaultPath(AvdInfo* avd,
-                               const char* proposedPath,
-                               std::string& defaultPath) {
-    if (!proposedPath || !avd || (strlen(proposedPath) == 0)) {
-        dprint("%s %d %s:proposed path is not set or avd is null\n", __FILE__,
-               __LINE__, __func__);
-        return;
-    } else {
-        dprint("%s %d %s:proposed path has size %d and is %s \n", __FILE__,
-               __LINE__, __func__, strlen(proposedPath), proposedPath);
-    }
-
-    std::string strProposed =
-            path_is_absolute(proposedPath)
-                    ? std::string(proposedPath)
-                    : PathUtils::join(path_getSdkRoot(), proposedPath);
-    if (!path_is_dir(strProposed.c_str())) {
-        dprint("%s %d %s:proposed path %s is not dir\n", __FILE__, __LINE__,
-               __func__, strProposed.c_str());
-        return;
-    }
-
-    dprint("%s %d %s:proposed dir %s is replacing default dir %s\n", __FILE__,
-           __LINE__, __func__, strProposed.c_str(), defaultPath.c_str());
-    defaultPath.swap(strProposed);
-}
-
-static void convertExt4ToQcow2(std::string ext4filepath) {
-    if (!path_exists(ext4filepath.c_str())) {
-        return;
-    }
-
-    std::string dataimageext4 = ext4filepath;
-    if (!System::get()->pathIsExt4(dataimageext4)) {
-        dprint("%s is not ext4\n", dataimageext4);
-        return;
-    }
-
-    auto startTime = std::chrono::steady_clock::now();
-    auto qemu_img = System::get()->findBundledExecutable("qemu-img");
-    std::string dataimageqcow2 = dataimageext4 + std::string(".tmp.qcow2");
-    auto res = System::get()->runCommandWithResult({qemu_img, "convert", "-O",
-                                                    "qcow2", dataimageext4,
-                                                    dataimageqcow2});
-    if (!System::get()->pathIsQcow2(dataimageqcow2)) {
-        dprint("%s is not qcow2\n", dataimageqcow2);
-        return;
-    }
-
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - startTime);
-
-    long long timeUsedMs = (long long)elapsed.count();
-    dprint("convert img from ext4 %s to qcow2 image %s %s, using "
-           "%lld "
-           "mini seconds",
-           dataimageext4.c_str(), dataimageqcow2.c_str(),
-           res == true ? " succeeded" : " failed", timeUsedMs);
-
-    path_delete_file(dataimageext4.c_str());
-    path_copy_file(dataimageext4.c_str(), dataimageqcow2.c_str());
-    path_delete_file(dataimageqcow2.c_str());
-}
-
-static int createUserData(AvdInfo* avd,
-                          const char* dataPath,
-                          AndroidHwConfig* hw,
-                          bool bShoudlConvertToQcow2) {
+static int createRawUserDataImage(AvdInfo* avd,
+                                  const char* dataPath,
+                                  AndroidHwConfig* hw) {
     ScopedCPtr<char> initDir(avdInfo_getDataInitDirPath(avd));
     bool needCopyDataPartition = true;
     if (path_exists(initDir.get())) {
@@ -602,37 +543,55 @@ static int createUserData(AvdInfo* avd,
 
         needCopyDataPartition = !creatUserDataExt4Img(hw, dataPath);
         path_delete_dir(dataPath);
-
-        if (bShoudlConvertToQcow2) {
-            auto startTime = std::chrono::steady_clock::now();
-            auto qemu_img = System::get()->findBundledExecutable("qemu-img");
-            std::string dataimageext4 =
-                    std::string(hw->disk_dataPartition_path);
-            convertExt4ToQcow2(dataimageext4);
-        };
     }
 
     if (needCopyDataPartition) {
-        if (path_exists(hw->disk_dataPartition_initPath)) {
+        if (hw->disk_dataPartition_initPath &&
+            System::get()->pathIsExt4(hw->disk_dataPartition_initPath)) {
             D("Creating: %s by copying from %s ", hw->disk_dataPartition_path,
               hw->disk_dataPartition_initPath);
 
-            if (path_copy_file(hw->disk_dataPartition_path,
-                               hw->disk_dataPartition_initPath) < 0) {
-                android_panic("Could not create %s: %s", hw->disk_dataPartition_path,
-                       strerror(errno));
+            if (path_exists(hw->disk_dataPartition_path) &&
+                path_delete_file(hw->disk_dataPartition_path)) {
+                derror("Could not remove incomplete RAW userdata image.");
+                return 1;
+            }
+            if (!android_copySparseFile(hw->disk_dataPartition_initPath,
+                                        hw->disk_dataPartition_path)) {
+                derror("Could not copy RAW userdata image to %s.",
+                       hw->disk_dataPartition_path);
                 return 1;
             }
 
-            resizeExt4Partition(getConsoleAgents()
-                                        ->settings->hw()
-                                        ->disk_dataPartition_path,
-                                getConsoleAgents()
-                                        ->settings->hw()
-                                        ->disk_dataPartition_size);
+            return resizeExt4Partition(hw->disk_dataPartition_path,
+                                       hw->disk_dataPartition_size);
+        } else {
+            derror("A RAW ext4 userdata initialization image is required.");
+            return 1;
         }
     }
 
+    return 0;
+}
+
+static int createUserData(AvdInfo* avd,
+                          const char* dataPath,
+                          AndroidHwConfig* hw) {
+    const std::string staging =
+            std::string(hw->disk_dataPartition_path) + ".raw-init";
+    if (path_exists(staging.c_str()) && path_delete_file(staging.c_str())) {
+        derror("Could not remove incomplete userdata image: %s", staging.c_str());
+        return 1;
+    }
+    AndroidHwConfig initial = *hw;
+    initial.disk_dataPartition_path = const_cast<char*>(staging.c_str());
+    const int result = createRawUserDataImage(avd, dataPath, &initial);
+    if (result || !android_replaceImageFile(staging.c_str(),
+                                           hw->disk_dataPartition_path)) {
+        path_delete_file(staging.c_str());
+        derror("Could not initialize RAW userdata image.");
+        return result ? result : 1;
+    }
     return 0;
 }
 
@@ -765,10 +724,11 @@ private:
                 break;
             case IMAGE_TYPE_USER_DATA:
                 filePath = m_hw->disk_dataPartition_path;
-                bufferString = StringFormat("%s.qcow2", filePath.data());
+                qCow2Format = false;
                 driveParam +=
-                        StringFormat("index=%d,id=userdata,if=none,file=%s",
-                                     m_driveIndex++, bufferString.c_str());
+                        StringFormat("index=%d,id=userdata,if=none,file=%s"
+                                     ",format=raw,cache=writeback",
+                                     m_driveIndex++, filePath.data());
                 deviceParam = StringFormat("%s,drive=userdata",
                                            kTarget.storageDeviceType);
                 break;
@@ -1439,176 +1399,6 @@ static std::string buildSoundhwParam(const int apiLevel,
     return param;
 }
 
-static std::string getKeyFromConfigFile(std::string config,
-                                        std::string key,
-                                        std::string defaultVal) {
-    IniFile configIni(config);
-    if (!configIni.read(false /* don't keep comments */)) {
-        dwarning("could not read %s at %s %d", config.c_str(), __FILE__,
-                 __LINE__);
-        return defaultVal;
-    }
-
-    if (!configIni.hasKey(key)) {
-        return defaultVal;
-    }
-
-    std::string ret = configIni.getString(key, defaultVal);
-    return ret;
-}
-
-static bool checkConfigIniCompatible(std::string srcConfig,
-                                     std::string destConfig) {
-    IniFile srcConfigIni(srcConfig);
-    if (!srcConfigIni.read(false /* don't keep comments */)) {
-        dwarning("could not read %s at %s %d", srcConfig.c_str(), __FILE__,
-                 __LINE__);
-        return false;
-    }
-
-    IniFile destConfigIni(destConfig);
-    if (!destConfigIni.read(false /* don't keep comments */)) {
-        dwarning("could not read %s at %s %d", destConfig.c_str(), __FILE__,
-                 __LINE__);
-        return false;
-    }
-
-    std::unordered_set<std::string> important{
-            "abi.type",       "hw.cpu.arch",       "hw.lcd.density",
-            "hw.lcd.height",  "hw.lcd.width",      "skin.name",
-            "hw.camera.back", "hw.camera.front",   "hw.keyboard",
-            "environment.width", "environment.height"};
-    for (auto&& key : srcConfigIni) {
-        if (important.count(key) == 0) {
-            continue;  // not important, ignore
-        }
-
-        if (!srcConfigIni.hasKey(key))
-            return false;
-        if (!destConfigIni.hasKey(key))
-            return false;
-        if (srcConfigIni.getString(key, "$$$") !=
-            destConfigIni.getString(key, "$$$"))
-            return false;
-    }
-
-    dprint("%s and %s are compatible", srcConfig, destConfig);
-    return true;
-}
-
-static void fixAvdConfig(std::string avdDir,
-                         std::string avdName,
-                         std::string avdDisplayName,
-                         std::string skinPath,
-                         std::string gpuMode,
-                         std::string gpuEnabled,
-                         AndroidHwConfig* hw) {
-    IniFile configIni(PathUtils::join(avdDir, "config.ini"));
-    if (!configIni.read(false)) {
-        dwarning("could not open %s/config.ini %s %d", avdDir.c_str(), __FILE__,
-                 __LINE__);
-        return;
-    }
-
-    configIni.setString("AvdId", avdName);
-    configIni.setString("avd.ini.displayname", avdDisplayName);
-    configIni.setString("firstboot.downloaded.path",
-                        hw->firstboot_downloaded_path);
-    configIni.setString("firstboot.local.path", hw->firstboot_local_path);
-    configIni.setString("skin.path", skinPath);
-    configIni.setString("hw.gpu.mode", gpuMode);
-    configIni.setString("hw.gpu.enabled", gpuEnabled);
-    configIni.writeIfChanged();
-}
-
-enum class SnapshotCompatibleType {
-    NONE,
-    COLD_BOOTABLE,
-    SNAPSHOT_LOADABLE,
-};
-
-static SnapshotCompatibleType checkFirstbootIniCompatible(
-        std::string srcFile,
-        std::string destFile) {
-    IniFile srcIni(srcFile);
-    if (!srcIni.read(false /* don't keep comments */)) {
-        dwarning("could not read %s at %s %d", srcFile.c_str(), __FILE__,
-                 __LINE__);
-        return SnapshotCompatibleType::NONE;
-    }
-
-    IniFile destIni(destFile);
-    if (!destIni.read(false /* don't keep comments */)) {
-        dwarning("could not read %s at %s %d", destFile.c_str(), __FILE__,
-                 __LINE__);
-        return SnapshotCompatibleType::NONE;
-    }
-
-    auto checkMatch = [&](std::vector<std::string>& keys,
-                          SnapshotCompatibleType retValWhenFail)
-            -> SnapshotCompatibleType {
-        for (const auto& key : keys) {
-            if (srcIni.getString(key, "$$$") != destIni.getString(key, "$$")) {
-                return retValWhenFail;
-            }
-        }
-        return SnapshotCompatibleType::SNAPSHOT_LOADABLE;
-    };
-
-    std::vector<std::string> keysNONE{
-            "System.Image.Fingerprint",
-    };
-
-    if (checkMatch(keysNONE, SnapshotCompatibleType::NONE) ==
-        SnapshotCompatibleType::NONE) {
-        return SnapshotCompatibleType::NONE;
-    }
-
-    // emulator version >= 33, should be backward compatible to 33;
-    // so we take it for granted that emulator version is not essential
-    // in addition, hypervisor version is not checked
-
-    std::vector<std::string> keysOther{
-            "Host.Os.Type",
-            "Host.Cpu.Vendor",
-            "Host.Hypervisor.Name",
-    };
-
-    if (checkMatch(keysOther, SnapshotCompatibleType::COLD_BOOTABLE) ==
-        SnapshotCompatibleType::COLD_BOOTABLE) {
-        return SnapshotCompatibleType::COLD_BOOTABLE;
-    }
-
-    return SnapshotCompatibleType::SNAPSHOT_LOADABLE;
-}
-
-static SnapshotCompatibleType checkCompatable(std::string srcAvdDir,
-                                              std::string destAvdDir) {
-    // 1, check basic compatibility: such as host/cpu/system image
-    // fingperprint/emulator version etc
-    auto srcFirstbootIni =
-            std::string{PathUtils::join(srcAvdDir, "firstboot.ini")};
-    auto destFirstbootIni =
-            std::string{PathUtils::join(destAvdDir, "firstboot.ini")};
-
-    auto firstbootCheck =
-            checkFirstbootIniCompatible(srcFirstbootIni, destFirstbootIni);
-    if (firstbootCheck == SnapshotCompatibleType::NONE) {
-        return SnapshotCompatibleType::NONE;
-    }
-
-    // 2, compare config.ini content
-    auto configCompatible =
-            checkConfigIniCompatible(PathUtils::join(srcAvdDir, "config.ini"),
-                                     PathUtils::join(destAvdDir, "config.ini"));
-
-    if (!configCompatible) {
-        return SnapshotCompatibleType::COLD_BOOTABLE;
-    }
-
-    return firstbootCheck;
-}
-
 extern "C" AndroidProxyCB* gAndroidProxyCB;
 extern "C" int main(int argc, char** argv) {
 #ifndef _WIN32
@@ -1694,7 +1484,9 @@ extern "C" int main(int argc, char** argv) {
 
     // Make the console agents available.
     const char* factory = "";
+    bool explicitWipeData = false;
     for (int i = 0; i < argc; i++) {
+        explicitWipeData |= strcmp(argv[i], "-wipe-data") == 0;
         if (strcmp(argv[i], "-debug-events") == 0) {
             factory = "debug";
         }
@@ -1834,6 +1626,30 @@ extern "C" int main(int argc, char** argv) {
     opts->ranchu = 1;
 
     getConsoleAgents()->settings->inject_AvdInfo(avd);
+    if (opts->read_only || opts->snapshot || opts->snapshot_list ||
+        opts->check_snapshot_loadable || opts->qcow2_for_userdata) {
+        derror("Single RAW userdata requires an exclusive cold boot; "
+               "QCOW2 userdata, snapshots and read-only instances are unsupported.");
+        return 1;
+    }
+    const std::string userdataOverlay =
+            std::string(hw->disk_dataPartition_path) + ".qcow2";
+    if (!explicitWipeData &&
+        (path_exists(userdataOverlay.c_str()) ||
+         System::get()->pathIsQcow2(hw->disk_dataPartition_path))) {
+        derror("Legacy QCOW2 userdata found. Convert the complete backing chain "
+               "to RAW before starting, or explicitly use -wipe-data to reset it.");
+        return 1;
+    }
+    opts->no_snapshot = true;
+    opts->no_snapshot_load = true;
+    opts->no_snapshot_save = true;
+    hw->userdata_useQcow2 = false;
+    android_op_wipe_data = opts->wipe_data;
+    fc::setEnabledOverride(fc::FastSnapshotV1, false);
+    fc::setEnabledOverride(fc::GenericSnapshotsUI, false);
+    fc::setEnabledOverride(fc::QuickbootFileBacked, false);
+    fc::setEnabledOverride(fc::DownloadableSnapshot, false);
     bool reportMetrics = !opts->fuchsia;
 
     if (reportMetrics) {
@@ -2329,189 +2145,8 @@ extern "C" int main(int argc, char** argv) {
 
 #endif
 
-    bool firstTimeSetup =
+    const bool firstTimeSetup =
             (android_op_wipe_data || !path_exists(hw->disk_dataPartition_path));
-
-    if (avd && feature_is_enabled(kFeature_DownloadableSnapshot) &&
-        (hw->firstboot_bootFromDownloadableSnapshot ||
-         hw->firstboot_bootFromLocalSnapshot) &&
-        !path_exists(hw->disk_dataPartition_path)) {
-        const char* avdName = avdInfo_getName(avd);
-        char* s_AvdFolder = path_getAvdContentPath(avdName);
-        if (s_AvdFolder) {
-            // create firstboot.ini
-            std::string orgSrcFirstbootIniFileName(
-                    PathUtils::join(s_AvdFolder, "firstboot.ini"));
-            android::avd::BugreportInfo bugInfo;
-            bugInfo.dumpFirstbootInfoForDownloadableSnapshot(
-                    orgSrcFirstbootIniFileName);
-
-            std::string systemImagePath =
-                    path_getAvdSystemPath(avdName, path_getSdkRoot(), false);
-            // try copy content from <sysimgdir>/snapshots/avd/default
-            std::string srcDirLocal = PathUtils::join(
-                    systemImagePath, "snapshots", "local", "avd");
-            replaceDefaultPath(avd, hw->firstboot_local_path, srcDirLocal);
-            str_reset(&hw->firstboot_local_path, srcDirLocal.c_str());
-
-            std::string srcDirDownloaded = PathUtils::join(
-                    systemImagePath, "snapshots", "downloaded", "avd");
-            replaceDefaultPath(avd, hw->firstboot_downloaded_path,
-                               srcDirDownloaded);
-            str_reset(&hw->firstboot_downloaded_path, srcDirDownloaded.c_str());
-
-            std::string srcDir;
-            std::string default_config_ini;
-
-            using android::snapshot::Snapshotter;
-            if (hw->firstboot_bootFromLocalSnapshot) {
-                srcDir = srcDirLocal;
-                default_config_ini = PathUtils::join(srcDir, "config.ini");
-                const std::string local_avd_src_prop =
-                        PathUtils::join(srcDirLocal, "source.properties");
-                if (!path_exists(default_config_ini.c_str()) ||
-                    !path_exists(local_avd_src_prop.c_str())) {
-                    srcDir.clear();
-                    default_config_ini.clear();
-                } else {
-                    Snapshotter::get().setSnapshotAvdSource(
-                            Snapshotter::SnapshotAvdSource::Local);
-                }
-            }
-
-            // use downloaded snapshot if we cannot use local snapshot
-            if (srcDir.empty() && hw->firstboot_bootFromDownloadableSnapshot) {
-                srcDir = srcDirDownloaded;
-                default_config_ini = PathUtils::join(srcDir, "config.ini");
-                Snapshotter::get().setSnapshotAvdSource(
-                        Snapshotter::SnapshotAvdSource::Downloaded);
-            }
-
-            bool startFromScratch = false;
-            using DownloadableSnapshotFailure =
-                    android::snapshot::Snapshotter::DownloadableSnapshotFailure;
-            if (!default_config_ini.empty() &&
-                path_exists(default_config_ini.c_str())) {
-                IniFile orgSrcConfigIni(
-                        PathUtils::join(s_AvdFolder, "config.ini"));
-                orgSrcConfigIni.read();
-
-                const std::string orgConfigFile =
-                        PathUtils::join(std::string(s_AvdFolder), "config.ini");
-                const std::string orgSkinPath =
-                        getKeyFromConfigFile(orgConfigFile, "skin.path", "");
-                const std::string orgDisplayName = getKeyFromConfigFile(
-                        orgConfigFile, "avd.ini.displayname", avdName);
-                const std::string orgGpuMode = getKeyFromConfigFile(
-                        orgConfigFile, "hw.gpu.mode", "yes");
-                const std::string orgGpuEnabled = getKeyFromConfigFile(
-                        orgConfigFile, "hw.gpu.enabled", "auto");
-                std::set<std::string> skipSet;
-
-                const auto compatibleCheckResult =
-                        checkCompatable(srcDir, std::string(s_AvdFolder));
-                if (compatibleCheckResult == SnapshotCompatibleType::NONE) {
-                    // cannot use anything from the downloadable snapshot
-                    startFromScratch = true;
-                    dwarning(
-                            "DownloadableSnapshot feature is not applicable on "
-                            "avd %s",
-                            avdName);
-                } else if (compatibleCheckResult ==
-                           SnapshotCompatibleType::COLD_BOOTABLE) {
-                    dwarning(
-                            "emulator: Not compatible with downloaded "
-                            "snapshot, forcing code boot");
-                    opts->no_snapshot_load = true;
-                    Snapshotter::get().setDownloadableSnapshotFailure(
-                            DownloadableSnapshotFailure::IncompatibleAvd);
-                }
-
-                if (!startFromScratch) {
-                    if (opts->no_snapshot_load) {
-                        // keep the original config.ini file
-                        skipSet.insert("config.ini");
-                    }
-
-                    dprint("emulator: First boot, copying snapshot...");
-                    dprint("emulator: copying snapshot from %s to %s",
-                           srcDir.c_str(), s_AvdFolder);
-                    auto startTime = std::chrono::steady_clock::now();
-                    path_delete_dir(s_AvdFolder);
-                    skipSet.insert("firstboot.ini");
-                    skipSet.insert("bootcompleted.ini");
-                    skipSet.insert("snapshot.trace");
-                    skipSet.insert("source.properties");
-                    skipSet.insert("multiinstance.lock");
-                    skipSet.insert("hardware-qemu.ini.lock");
-                    if (-1 == path_copy_dir_ex(s_AvdFolder, srcDir.c_str(),
-                                               &skipSet)) {
-                        // copy failed
-                        dwarning(
-                                "emulator: failed to copy downloaded snapshot, "
-                                "fresh boot");
-                        opts->no_snapshot_load = true;
-                        Snapshotter::get().setDownloadableSnapshotFailure(
-                                DownloadableSnapshotFailure::FailedToCopyAvd);
-                        // need to do a wipedata again
-                        path_delete_dir(s_AvdFolder);
-                        path_mkdir_if_needed(s_AvdFolder, 0777);
-                        // create config.ini
-                        orgSrcConfigIni.write();
-                        startFromScratch = true;
-                    } else {
-                        if (opts->no_snapshot_load) {
-                            const std::string avdSnapshotDir =
-                                    PathUtils::join(s_AvdFolder, "snapshots");
-                            path_delete_dir(avdSnapshotDir.c_str());
-                            // create config.ini
-                            orgSrcConfigIni.write();
-                        }
-                        auto elapsed = std::chrono::duration_cast<
-                                std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now() - startTime);
-
-                        long long timeUsedMs = (long long)elapsed.count();
-                        dprint("emulator: copying snapshot done, using %lld "
-                               "mini "
-                               "seconds",
-                               timeUsedMs);
-                        Snapshotter::get().settDownloadableSnapshotCopyTime(
-                                timeUsedMs);
-                        firstTimeSetup = false;  // already setup
-                        if (!opts->no_snapshot_load) {
-                            // fix AvdId, displayname and paths
-                            fixAvdConfig(std::string(s_AvdFolder), avdName,
-                                         orgDisplayName, orgSkinPath,
-                                         orgGpuMode, orgGpuEnabled, hw);
-                        }
-                    }
-                }
-            } else {
-                startFromScratch = true;
-            }
-
-            if (startFromScratch) {
-                //  first boot, and there is no local avd, then convert
-                //  sdcard.img to qcow2
-                auto startTime = std::chrono::steady_clock::now();
-                auto qemu_img =
-                        System::get()->findBundledExecutable("qemu-img");
-                std::string dataimageext4 = std::string(hw->hw_sdCard_path);
-                convertExt4ToQcow2(dataimageext4);
-            }
-
-            // firstboot.ini could be wiped out, create again
-            if (!path_exists(orgSrcFirstbootIniFileName.c_str())) {
-                android::avd::BugreportInfo bugInfo;
-                bugInfo.dumpFirstbootInfoForDownloadableSnapshot(
-                        orgSrcFirstbootIniFileName);
-            }
-
-            free(s_AvdFolder);
-            s_AvdFolder = nullptr;
-        }
-    }
 
     // studio avd manager does not allow user to change partition size, set a
     // lower limit to 6GB.
@@ -2581,54 +2216,41 @@ extern "C" int main(int argc, char** argv) {
             }
         }
 
-        // convert the ext4 to qcow2
-        bool bShoudlConvertToQcow2 = false;
-
-        if (feature_is_enabled(kFeature_DownloadableSnapshot) ||
-            opts->qcow2_for_userdata || hw->userdata_useQcow2) {
-            bShoudlConvertToQcow2 = true;
-        }
-
-        int ret = createUserData(avd, dataPath.c_str(), hw,
-                                 bShoudlConvertToQcow2);
+        int ret = createUserData(avd, dataPath.c_str(), hw);
         if (ret != 0) {
             crashhandler_die("Failed to initialize userdata.img.");
             return ret;
         }
+        if (path_exists(userdataOverlay.c_str()) &&
+            path_delete_file(userdataOverlay.c_str())) {
+            derror("Could not remove the reset userdata overlay: %s",
+                   userdataOverlay.c_str());
+            return 1;
+        }
     } else {
-        // Resize userdata-qemu.img if the size is smaller than what
-        // config.ini says and also delete userdata-qemu.img.qcow2.
-        // This can happen as user wants a larger data
-        // partition without wiping it. b.android.com/196926
-        System::FileSize current_data_size;
-        if (System::get()->pathIsExt4(hw->disk_dataPartition_path) &&
-            System::get()->pathFileSize(hw->disk_dataPartition_path,
-                                        &current_data_size)) {
-            System::FileSize partition_size = static_cast<System::FileSize>(
-                    getConsoleAgents()
-                            ->settings->hw()
-                            ->disk_dataPartition_size);
-            if (getConsoleAgents()->settings->hw()->disk_dataPartition_size >
-                        0 &&
-                current_data_size < partition_size) {
-                dwarning(
-                        "userdata partition is resized from %d M to %d "
-                        "M",
-                        (int)(current_data_size / (1024 * 1024)),
-                        (int)(partition_size / (1024 * 1024)));
-                if (!resizeExt4Partition(getConsoleAgents()
-                                                 ->settings->hw()
-                                                 ->disk_dataPartition_path,
-                                         getConsoleAgents()
-                                                 ->settings->hw()
-                                                 ->disk_dataPartition_size)) {
-                    path_delete_file(
-                            StringFormat("%s.qcow2",
-                                         getConsoleAgents()
-                                                 ->settings->hw()
-                                                 ->disk_dataPartition_path)
-                                    .c_str());
-                }
+        System::FileSize currentSize = 0;
+        if (!System::get()->pathFileSize(hw->disk_dataPartition_path,
+                                        &currentSize) || !currentSize ||
+            currentSize % 512 != 0) {
+            derror("Invalid RAW userdata image size.");
+            return 1;
+        }
+        const auto requestedSize = static_cast<System::FileSize>(
+                hw->disk_dataPartition_size);
+        if (requestedSize && requestedSize < currentSize) {
+            derror("Shrinking an existing RAW userdata image is unsupported. "
+                   "Keep its current capacity or explicitly reset the AVD.");
+            return 1;
+        }
+        if (requestedSize > currentSize) {
+            if (!System::get()->pathIsExt4(hw->disk_dataPartition_path)) {
+                derror("Cannot resize encrypted RAW userdata from the host. "
+                       "Keep its current capacity or explicitly reset the AVD.");
+                return 1;
+            }
+            if (resizeExt4Partition(hw->disk_dataPartition_path, requestedSize)) {
+                derror("Failed to resize RAW userdata.");
+                return 1;
             }
         }
     }
