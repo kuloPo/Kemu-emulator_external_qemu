@@ -1,5 +1,7 @@
 // Opt-in checks run inside the real emulator UI thread, using the real GPU
 // child window. Not included in the normal release build.
+// KEMU_GUI_TEST_MUTE_APP limits the checks to the sidebar mute button once
+// that package is in the foreground and playing audio.
 #include <QAbstractButton>
 #include <QApplication>
 #include <QElapsedTimer>
@@ -25,6 +27,8 @@ public:
     LiveGuiChecks(EmulatorContainer* root, EmulatorQtWindow* display)
         : QObject(root), mRoot(root), mDisplay(display) {
         mBefore = root->size();
+        mMuteApp = qEnvironmentVariable("KEMU_GUI_TEST_MUTE_APP");
+        if (!mMuteApp.isEmpty()) mStage = 14;
         mElapsed.start();
         connect(&mTimer, &QTimer::timeout, this, [this] { tick(); });
         mTimer.start(16);
@@ -97,6 +101,20 @@ private:
     }
     void tick() {
         if (mFailed) return;
+        if (!mMuteApp.isEmpty() && !mMuteAppReady) {
+            if (mElapsed.elapsed() > 90000) { fail("Timed out waiting for the mute test app"); return; }
+            if (++mStable % 30) return;
+            const QString focus = QRegularExpression("mCurrentFocus=([^\\n]+)")
+                .match(adb({"shell", "dumpsys", "window"})).captured(1);
+            if (!focus.contains(mMuteApp + "/")) return;
+            const QString pid = adb({"shell", "pidof", mMuteApp}).trimmed();
+            const QString audio = adb({"shell", "dumpsys", "audio"});
+            if (pid.isEmpty() || !QRegularExpression("u/pid:\\d+/" +
+                    QRegularExpression::escape(pid) + " state:started").match(audio).hasMatch()) return;
+            mMuteAppReady = true;
+            mElapsed.restart();
+            mChecks.append("Mute test foreground: " + focus);
+        }
         if (mElapsed.elapsed() > 5000) { fail(QString("Stage %1 timed out; surface %2x%3, viewport %4x%5")
             .arg(mStage).arg(mDisplay->width()).arg(mDisplay->height()).arg(mRoot->viewport()->width()).arg(mRoot->viewport()->height())); return; }
         if (mStage <= 7) {
@@ -164,6 +182,12 @@ private:
             } else if (mStage == 16) {
                 auto* b = button(QStringLiteral("静音／取消静音"));
                 if (!b || !b->isEnabled() || muted() != mMutedBefore) return;
+                if (!mMuteApp.isEmpty()) {
+                    mChecks.append("Sidebar mute button toggled and restored Android media mute");
+                    mTimer.stop();
+                    save();
+                    return;
+                }
                 mChecks.append("minimize/restore; six internal key buttons; Home resumed launcher; mute toggled and restored");
                 doubleClickTitle();
             } else if (mStage == 17) {
@@ -188,6 +212,8 @@ private:
     QJsonArray mChecks;
     QJsonObject mGeometry;
     QString mMutedBefore;
+    QString mMuteApp;
+    bool mMuteAppReady = false;
     int mStage=0, mStable=0, mFirstFit=-1;
     bool mFailed=false;
 };

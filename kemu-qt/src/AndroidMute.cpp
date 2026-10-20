@@ -12,6 +12,23 @@ using android::emulation::AdbConnection;
 using android::emulation::AdbStream;
 using namespace std::chrono_literals;
 
+namespace {
+// Control STREAM_MUSIC through AudioService so foreground apps cannot consume
+// the request. Read the guest state on every click and verify the change.
+constexpr char kToggleMuteCommand[] = R"SH(shell:(
+music_mute() {
+    dumpsys audio | sed -n '/^- STREAM_MUSIC:/,/^$/s/^[[:space:]]*Muted: //p'
+}
+case "$(music_mute)" in
+    false) action=adj-mute; expected=true ;;
+    true) action=adj-unmute; expected=false ;;
+    *) exit 1 ;;
+esac
+cmd audio "$action" 3 || exit 1
+[ "$(music_mute)" = "$expected" ]
+); printf '\n__KEMU_MUTE_EXIT:%s\n' "$?")SH";
+}  // namespace
+
 struct AndroidMute::Request {
     std::mutex mutex;
     bool cancelled = false;
@@ -60,19 +77,20 @@ bool AndroidMute::send(std::function<void(QString)> completed) {
         if (!connection) { request->error = QCoreApplication::translate("Kemu", "Android connection is unavailable"); return; }
         // Fixed command: the marker reports the guest command's exit status
         // even when using the shell v1 protocol. No host adb.exe is launched.
-        const auto stream = connection->open("shell:input keyevent 164; echo __KEMU_KEY_EXIT:$?", 2000ms);
+        const auto stream = connection->open(kToggleMuteCommand, 2000ms);
         {
             std::lock_guard<std::mutex> lock(request->mutex);
             request->stream = stream;
             if (request->cancelled) { if (stream) stream->close(); return; }
         }
-        if (!stream || !stream->good()) { request->error = QCoreApplication::translate("Kemu", "Android key channel is unavailable"); return; }
+        if (!stream || !stream->good()) { request->error = QCoreApplication::translate("Kemu", "Android audio control channel is unavailable"); return; }
         std::string response;
         char ch;
         while (response.size() < 4096 && stream->get(ch)) response.push_back(ch);
         stream->close();
-        if (response.find("__KEMU_KEY_EXIT:0") == std::string::npos)
-            request->error = QCoreApplication::translate("Kemu", "Android did not complete the mute key event");
+        if (response.find("\n__KEMU_MUTE_EXIT:0\n") == std::string::npos &&
+            response.find("\r\n__KEMU_MUTE_EXIT:0\r\n") == std::string::npos)
+            request->error = QCoreApplication::translate("Kemu", "Android did not change the media mute state");
     });
     connect(mThread, &QThread::finished, this, [this, request, completed = std::move(completed)] {
         mDeadline.stop();
@@ -81,7 +99,7 @@ bool AndroidMute::send(std::function<void(QString)> completed) {
         QString error;
         {
             std::lock_guard<std::mutex> lock(request->mutex);
-            error = request->cancelled ? QCoreApplication::translate("Kemu", "Android mute key event timed out or was cancelled") : request->error;
+            error = request->cancelled ? QCoreApplication::translate("Kemu", "Android mute request timed out or was cancelled") : request->error;
         }
         mRequest.reset();
         completed(error);

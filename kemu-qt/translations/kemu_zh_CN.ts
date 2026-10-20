@@ -291,18 +291,18 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
     </message>
     <message>
         <location filename="../src/AndroidMute.cpp" line="69"/>
-        <source>Android key channel is unavailable</source>
-        <translation>Android 按键通道不可用</translation>
+        <source>Android audio control channel is unavailable</source>
+        <translation>Android 音频控制通道不可用</translation>
     </message>
     <message>
         <location filename="../src/AndroidMute.cpp" line="75"/>
-        <source>Android did not complete the mute key event</source>
-        <translation>Android 未完成静音按键</translation>
+        <source>Android did not change the media mute state</source>
+        <translation>Android 未能切换媒体静音状态</translation>
     </message>
     <message>
         <location filename="../src/AndroidMute.cpp" line="84"/>
-        <source>Android mute key event timed out or was cancelled</source>
-        <translation>Android 静音按键超时或已取消</translation>
+        <source>Android mute request timed out or was cancelled</source>
+        <translation>Android 静音请求超时或已取消</translation>
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="90"/>

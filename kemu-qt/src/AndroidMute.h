@@ -9,8 +9,8 @@
 class QThread;
 
 namespace kemu {
-// Injects Android VOLUME_MUTE using the emulator's existing in-process ADB
-// transport. The image's qwerty2 layout has no Linux KEY_MUTE mapping.
+// Toggles Android's media mute state through AudioService using the emulator's
+// existing in-process ADB transport.
 class AndroidMute final : public QObject {
 public:
     explicit AndroidMute(QObject* parent);
