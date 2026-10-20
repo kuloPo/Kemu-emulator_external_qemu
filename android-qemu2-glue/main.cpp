@@ -2168,40 +2168,6 @@ extern "C" int main(int argc, char** argv) {
 
     // Create userdata file from init version if needed.
     if (firstTimeSetup) {
-        // Check free space first if the path does not exist.
-        if (!path_exists(hw->disk_dataPartition_path)) {
-            System::FileSize availableSpace;
-
-            auto dataPartitionPathAsDir =
-                    PathUtils::pathToDir(hw->disk_dataPartition_path);
-
-            if (dataPartitionPathAsDir &&
-                System::get()->pathFreeSpace(*dataPartitionPathAsDir,
-                                             &availableSpace)) {
-                constexpr double kDataPartitionSafetyFactor = 1.2;
-
-                double needed = kDataPartitionSafetyFactor *
-                                getConsoleAgents()
-                                        ->settings->hw()
-                                        ->disk_dataPartition_size /
-                                (1024.0 * 1024.0);
-
-                double available = (double)availableSpace / (1024.0 * 1024.0);
-
-                if (needed > available) {
-                    android_panic(
-                            "Not enough space to create userdata partition. "
-                            "Available: %.2f MB at %s, "
-                            "need %.2f MB.",
-                            available, dataPartitionPathAsDir->c_str(), needed);
-                    return 1;
-                }
-            } else {
-                // default to assuming enough space if the free space query
-                // fails.
-            }
-        }
-
         // pixel_fold quirk, fail fast when the device is pixel_fold
         // but the image is not supporting the foldable feature
         if (hw->hw_device_name) {

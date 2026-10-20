@@ -1,13 +1,30 @@
 # RAW user data
 
 Kemu opens `avd/kemu.avd/userdata-qemu.img` directly as a writable RAW block
-device. The Android filesystem and encryption settings are unchanged.
+device. Userdata uses ext4 with Android encryption enabled.
 `system-img/userdata.img` remains the initialization template.
+
+New Kemu instances default to `1000G` (1000 GiB). Existing configured capacities
+are preserved. Creating a sparse data image does not require free host space
+equal to its virtual capacity. Startup does not enforce a virtual-capacity
+space check or a minimum-free-space threshold on the host.
+Image creation and actual writes still report filesystem or block-device errors.
+Exhausting host storage can interrupt writes and damage guest data; reaching
+the guest filesystem's capacity produces its normal out-of-space behavior.
 
 New data images are copied or formatted as sparse files and expanded to the
 configured virtual capacity. Initialization happens in `userdata-qemu.img.raw-init`;
 only a completed image replaces the live path. Windows requires a filesystem
 supporting sparse files, such as NTFS.
+
+Userdata uses 256 KiB per inode (512 inodes per 128 MiB ext4 block group).
+The AOSP emu64xa template reserves 2560 inodes across its five block groups;
+the host directory formatter uses the same density. Expansion to 1000 GiB
+provides 4,096,000 inodes, with about 1.95 GiB of inode tables when using the
+template's 512-byte inodes. Files and directories share this finite inode budget.
+Existing filesystems retain their inode density and require a data reset to
+adopt a rebuilt template. Keep the rebuilt `system-img/userdata.img` with the
+runtime; copying an older template restores that template's original density.
 
 ## Existing instances
 

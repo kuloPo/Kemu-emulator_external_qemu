@@ -4,7 +4,6 @@ android_add_library(
   SOURCE_DIR
   src
   SRC android/compatibility_check.cpp
-      android/disk_space_check.cpp
       android/hw_gpu_check.cpp
       android/system_check.cpp
       android/hypervisor_check.cpp

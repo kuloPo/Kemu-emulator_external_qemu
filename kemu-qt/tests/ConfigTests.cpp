@@ -145,7 +145,7 @@ int main() {
         require(rejected && kemu::fs::is_directory(avd), "directory was overwritten");
         config.avdRoot = temporary / "fresh";
         config.prepare();
-        require(read(config.avdRoot / "kemu.avd/config.ini").find("disk.dataPartition.size=32G") != std::string::npos, "new instance default missing");
+        require(read(config.avdRoot / "kemu.avd/config.ini").find("disk.dataPartition.size=1000G\n") != std::string::npos, "new instance default missing");
         require(kemu::quoteArgument(L"C:\\space path\\") == L"\"C:\\space path\\\\\"", "trailing slash quoting");
         require(kemu::quoteArgument(L"a\"b") == L"\"a\\\"b\"", "embedded quote escaping");
         const auto performanceFile = config.avdRoot / "performance.ini";
