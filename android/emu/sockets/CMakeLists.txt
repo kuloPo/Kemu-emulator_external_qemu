@@ -17,6 +17,7 @@ target_include_directories(android-emu-sockets PUBLIC include PRIVATE src)
 
 android_add_test(
   TARGET android-emu-sockets_unittests SOURCE_DIR test
-  SRC android/emulation/CrossSessionSocket_unittest.cpp
+  SRC android/base/async/AsyncSocket_unittest.cpp
+      android/emulation/CrossSessionSocket_unittest.cpp
   DEPS android-emu-base android-emu-base-headers android-emu-sockets gmock gmock_main gtest)
 target_include_directories(android-emu-sockets_unittests PRIVATE src)

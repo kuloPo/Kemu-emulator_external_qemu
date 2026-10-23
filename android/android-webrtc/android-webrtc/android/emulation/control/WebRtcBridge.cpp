@@ -10,7 +10,7 @@
 
 #include "aemu/base/Log.h"                   // for LogStreamVoidify, LOG
 #include "aemu/base/Optional.h"              // for Optional
-#include "aemu/base/async/AsyncSocket.h"     // for AsyncSocket
+#include "android/base/async/AsyncSocket.h"  // for AsyncSocket
 #include "aemu/base/sockets/ScopedSocket.h"  // for ScopedSocket
 #include "aemu/base/sockets/SocketUtils.h"   // for socketGetPort, socket...
 #include "android/base/system/System.h"      // for System, System::Pid

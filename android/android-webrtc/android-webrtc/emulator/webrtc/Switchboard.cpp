@@ -28,7 +28,7 @@
 
 
 #include "aemu/base/Log.h"                     // for LogStreamVoidify, LOG
-#include "aemu/base/async/AsyncSocket.h"       // for AsyncSocket
+#include "android/base/async/AsyncSocket.h"    // for AsyncSocket
 #include "aemu/base/containers/BufferQueue.h"  // for BufferQueueResult
 #include "aemu/base/synchronization/Lock.h"    // for Lock, AutoReadLock
 #include "android/base/system/System.h"        // for System, System::Dur...

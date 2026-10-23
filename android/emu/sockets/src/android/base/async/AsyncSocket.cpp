@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#include "aemu/base/async/AsyncSocket.h"
+#include "android/base/async/AsyncSocket.h"
 
 #include <condition_variable>
 #include <cstdio>
@@ -217,18 +217,26 @@ void AsyncSocket::close() {
 }
 
 bool AsyncSocket::connect() {
+    std::lock_guard<std::mutex> connectLock(mConnectThreadLock);
     if (mConnecting) {
         return true;
     }
+    {
+        std::lock_guard<std::mutex> watchLock(mWatchLock);
+        if (connected()) return true;
+    }
 
+    // A completed connection thread remains joinable until it is collected.
+    // Replacing it directly would terminate the process on reconnect.
+    if (mConnectThread) {
+        mConnectThread->join();
+    }
     mConnecting = true;
     mConnectThread = std::make_unique<std::thread>([this] { connectToPort(); });
-    return mConnecting;
+    return true;
 }
 
 bool AsyncSocket::connectSync(std::chrono::milliseconds timeout) {
-    if (connected()) return true;
-
     if (!this->connect()) return false;
 
     std::unique_lock<std::mutex> watchLock(mWatchLock);

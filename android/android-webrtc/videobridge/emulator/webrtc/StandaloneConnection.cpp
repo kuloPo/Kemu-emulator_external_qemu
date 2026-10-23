@@ -21,7 +21,7 @@
 #include <string>                         // for string, operator==
 
 #include "aemu/base/Log.h"                 // for LogStreamVoidify, LOG
-#include "aemu/base/async/AsyncSocket.h"   // for AsyncSocket
+#include "android/base/async/AsyncSocket.h"  // for AsyncSocket
 #include "android/emulation/control/utils/EmulatorGrcpClient.h"  // for EmulatorGrpcClient
 #include "emulator/webrtc/Participant.h"      // for Participant, DataChanne...
 #include "emulator_controller.pb.h"           // for KeyboardEvent, MouseEvent
