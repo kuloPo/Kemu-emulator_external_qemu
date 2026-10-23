@@ -30,6 +30,8 @@ if(KEMU_LUPDATE_EXECUTABLE)
         VERBATIM)
 endif()
 
+add_subdirectory(rotation-observer)
+
 # Built as part of the emulator's existing Qt library and QApplication.
 target_sources(aemu-ui-qt PRIVATE
     ${KEMU_LANGUAGE_SOURCES}

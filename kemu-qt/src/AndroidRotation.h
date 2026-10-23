@@ -17,13 +17,14 @@ public:
 
 private:
     struct Request;
-    void poll();
+    void listen();
     void cancelRequest();
     std::shared_ptr<Request> mRequest;
     QThread* mThread = nullptr;
-    QTimer mPoll;
+    QTimer mRetry;
     QTimer mDeadline;
     std::function<void(int)> mChanged;
     bool mActive = false;
+    int mRetryDelay = 1000;
 };
 }  // namespace kemu
