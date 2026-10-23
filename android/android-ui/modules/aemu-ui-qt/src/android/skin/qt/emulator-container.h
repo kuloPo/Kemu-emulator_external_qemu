@@ -64,6 +64,7 @@ public:
 
     void initializeKemuUi();
     void kemuSurfaceChanged();
+    void kemuBeginClose();
     bool nativeEvent(const QByteArray& type, void* message, qintptr* result) override;
     void show();
     void showMinimized();

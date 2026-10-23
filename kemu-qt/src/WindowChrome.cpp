@@ -4,6 +4,7 @@
 #include "UiLanguage.h"
 #include "IconButton.h"
 #include "AndroidMute.h"
+#include "AndroidRotation.h"
 #ifdef _WIN32
 #include "UpdateController.h"
 #endif
@@ -40,6 +41,7 @@ static void initKemuResources() { Q_INIT_RESOURCE(kemu); }
 namespace kemu {
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
+void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 #endif
 bool enabled() {
 #ifdef _WIN32
@@ -113,6 +115,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
 
     mSidebar = new QWidget(container);
     mMute = new AndroidMute(this);
+    mRotation = new AndroidRotation(this);
     mSidebar->setObjectName("KemuSidebar");
     mSidebar->setStyleSheet("#KemuSidebar { background: #1b2028; }");
     auto* side = new QVBoxLayout(mSidebar);
@@ -208,6 +211,8 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         QSize(hardware->hw_lcd_width, hardware->hw_lcd_height), available.size());
     container->setMinimumSize(sizing.minimum);
     container->resize(sizing.initial);
+    mSurfacePortrait = hardware->hw_lcd_width < hardware->hw_lcd_height;
+    mNormalSizes[mSurfacePortrait] = sizing.initial;
     container->move(available.center() - container->rect().center());
     layout();
     applyUiFont(mTitle);
@@ -277,6 +282,22 @@ void WindowChrome::requestResize() {
 }
 
 void WindowChrome::surfaceChanged() {
+    const bool portrait = mDisplay->width() < mDisplay->height();
+    if (portrait != mSurfacePortrait) {
+        // Until a deferred resize is applied, normalGeometry still belongs to
+        // the orientation before maximizing or minimizing the window.
+        if (mPendingWindowSize.isEmpty()) {
+            const QRect normal = mContainer->normalGeometry();
+            mPendingWindowCenter = normal.center();
+            if (!normal.isEmpty()) mNormalSizes[mSurfacePortrait] = normal.size();
+        }
+        mSurfacePortrait = portrait;
+        const auto sizing = windowSizing(mDisplay->size(), mContainer->screen()->availableGeometry().size());
+        mContainer->setMinimumSize(sizing.minimum);
+        mPendingWindowSize = mNormalSizes[portrait].isEmpty() ? sizing.initial : mNormalSizes[portrait];
+        applyPendingWindowSize();
+        mRequestedSize = {};
+    }
     mHaveSurface = true;
     requestResize();
     if (!mReady || mClosing) mLoading->raise();
@@ -289,7 +310,16 @@ void WindowChrome::pollBoot() {
     mLoading->hide();
     for (auto* button : mButtons) button->setEnabled(true);
     mDisplay->setFocus(Qt::OtherFocusReason);
+    mRotation->start([this](int rotation) {
+        if (mClosing || rotation == mGuestRotation) return;
+        mGuestRotation = rotation;
+        mRequestedSize = {};
+        // Android rotates its logical display counterclockwise relative to
+        // the framebuffer; the host skin must apply the inverse transform.
+        mDisplay->rotateSkin(static_cast<SkinRotation>((4 - rotation) % 4));
+    });
 #ifdef KEMU_GUI_TESTS
+    if (qEnvironmentVariableIsSet("KEMU_ROTATION_TEST_RESULTS")) startRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_RESULTS")) startLiveGuiChecks(mContainer, mDisplay);
 #endif
 }
@@ -317,12 +347,26 @@ void WindowChrome::checkAdb() {
 }
 
 void WindowChrome::updateWindowState() {
+    applyPendingWindowSize();
     const bool maximized = mContainer->isMaximized();
     mMaximize->setIconType(maximized ? Icon::Restore : Icon::Maximize);
     const QString label = maximized ? QCoreApplication::translate("Kemu", "Restore") : QCoreApplication::translate("Kemu", "Maximize");
     mMaximize->setToolTip(label);
     mMaximize->setAccessibleName(label);
     layout();
+}
+
+void WindowChrome::applyPendingWindowSize() {
+    if (mPendingWindowSize.isEmpty() || mContainer->isMaximized() ||
+        mContainer->isMinimized() || mContainer->isFullScreen()) return;
+    const QRect available = mContainer->screen()->availableGeometry();
+    const QPoint center = mPendingWindowCenter;
+    const QSize size = mPendingWindowSize.boundedTo(available.size()).expandedTo(mContainer->minimumSize());
+    mPendingWindowSize = {};
+    mContainer->resize(size);
+    const QPoint origin = center - mContainer->rect().center();
+    mContainer->move(qBound(available.left(), origin.x(), available.right() - size.width() + 1),
+                     qBound(available.top(), origin.y(), available.bottom() - size.height() + 1));
 }
 
 void WindowChrome::toggleMaximized() {
@@ -360,6 +404,7 @@ void WindowChrome::beginClose() {
     mBootPoll.stop();
     mResize.stop();
     mMute->cancel();
+    mRotation->stop();
     for (auto* button : mButtons) button->setEnabled(false);
     mLoadingText->setText(QCoreApplication::translate("Kemu", "Closing"));
     mLoading->show();
@@ -414,6 +459,7 @@ void WindowChrome::writeDiagnostics() {
     const auto rect = [](const QRect& r) { return QJsonObject{{"x",r.x()}, {"y",r.y()}, {"w",r.width()}, {"h",r.height()}}; };
     QJsonObject data{{"pid", qint64(QCoreApplication::applicationPid())}, {"qt", qVersion()},
         {"ready", mReady}, {"closing",mClosing}, {"maximized",mContainer->isMaximized()},
+        {"guestRotation",mGuestRotation}, {"surfacePortrait",mSurfacePortrait},
         {"maximizeTooltip",mMaximize->toolTip()}, {"window",rect(mContainer->geometry())},
         {"viewport",rect(viewport)}, {"surface",rect(surface)}, {"sidebar",rect(mSidebar->geometry())},
         {"dpr",mContainer->devicePixelRatioF()}, {"loading",mLoading->isVisible()},

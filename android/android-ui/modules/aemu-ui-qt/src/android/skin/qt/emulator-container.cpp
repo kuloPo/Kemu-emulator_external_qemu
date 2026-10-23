@@ -190,6 +190,10 @@ void EmulatorContainer::kemuSurfaceChanged() {
     if (mKemuUi) mKemuUi->surfaceChanged();
 }
 
+void EmulatorContainer::kemuBeginClose() {
+    if (mKemuUi) mKemuUi->beginClose();
+}
+
 bool EmulatorContainer::nativeEvent(const QByteArray& type, void* message, qintptr* result) {
     if (mKemuUi && mKemuUi->nativeEvent(message, result)) return true;
     return QScrollArea::nativeEvent(type, message, result);
@@ -349,7 +353,7 @@ void EmulatorContainer::changeEvent(QEvent* event) {
 }
 
 void EmulatorContainer::closeEvent(QCloseEvent* event) {
-    if (mKemuUi) mKemuUi->beginClose();
+    kemuBeginClose();
     // make sure the toolWindow's close button is the only exit point
     // from qt: we could get closeEvent directly from host windowing
     // framework.

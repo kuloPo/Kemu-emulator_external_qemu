@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QPoint>
 #include <QSize>
 #include <QTimer>
 #include <QVector>
@@ -14,6 +15,7 @@ class QEvent;
 
 namespace kemu {
 class AndroidMute;
+class AndroidRotation;
 class UpdateController;
 bool enabled();
 
@@ -36,6 +38,7 @@ private:
     void pollBoot();
     void writeDiagnostics();
     void checkAdb();
+    void applyPendingWindowSize();
     EmulatorContainer* mContainer;
     EmulatorQtWindow* mDisplay;
     QWidget* mTitle = nullptr;
@@ -44,11 +47,17 @@ private:
     QLabel* mLoadingText = nullptr;
     IconButton* mMaximize = nullptr;
     AndroidMute* mMute = nullptr;
+    AndroidRotation* mRotation = nullptr;
     UpdateController* mUpdates = nullptr;
     QVector<IconButton*> mButtons;
     QTimer mResize;
     QTimer mBootPoll;
     QSize mRequestedSize;
+    QSize mNormalSizes[2];
+    QSize mPendingWindowSize;
+    QPoint mPendingWindowCenter;
+    bool mSurfacePortrait = false;
+    int mGuestRotation = -1;
     bool mLayoutActive = false;
     bool mHaveSurface = false;
     bool mReady = false;

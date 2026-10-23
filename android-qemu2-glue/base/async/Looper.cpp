@@ -26,13 +26,13 @@ extern "C" {
 #include "qemu/osdep.h"
 #include "qemu-common.h"
 #include "qemu/timer.h"
-#include "qemu/coroutine.h"
 #include "qemu/main-loop.h"
 #include "chardev/char.h"
 }  // extern "C"
 
 #include <memory>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 
@@ -81,7 +81,9 @@ public:
 
     std::string_view name() const override { return "QEMU2 main loop"; }
 
-    bool onLooperThread() const override { return qemu_in_coroutine(); }
+    bool onLooperThread() const override {
+        return std::this_thread::get_id() == mThreadId;
+    }
 
     static QEMUClockType toQemuClockType(ClockType clock) {
         static_assert((int) QEMU_CLOCK_HOST == (int) BaseLooper::ClockType::kHost &&
@@ -396,6 +398,8 @@ private:
         }
     }
 
+    // Main-loop teardown also runs on this thread, outside a coroutine.
+    const std::thread::id mThreadId = std::this_thread::get_id();
     const std::unique_ptr<QEMUBH, QEMUBHDeleter> mQemuBh;
     FdWatchSet mPendingFdWatches;
 };

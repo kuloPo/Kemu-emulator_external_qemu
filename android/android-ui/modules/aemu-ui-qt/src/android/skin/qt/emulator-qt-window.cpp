@@ -2377,6 +2377,7 @@ void EmulatorQtWindow::slot_releaseBitmap(SkinSurface* s,
 }
 
 void EmulatorQtWindow::slot_requestClose(QSemaphore* semaphore) {
+    mContainer.kemuBeginClose();
     if (isMainThreadRunning() && !mToolWindow->closeButtonClicked()) {
         mToolWindow->on_close_button_clicked();
     }
@@ -3518,7 +3519,8 @@ void EmulatorQtWindow::scaleUp() {
 }
 
 void EmulatorQtWindow::fixScale() {
-    doResize(mContainer.size(), true);
+    if (kemu::enabled()) doResize(mContainer.viewport()->size());
+    else doResize(mContainer.size(), true);
 }
 
 void EmulatorQtWindow::zoomIn() {

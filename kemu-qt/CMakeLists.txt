@@ -37,13 +37,16 @@ target_sources(aemu-ui-qt PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.h
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.h
+    ${CMAKE_CURRENT_LIST_DIR}/src/AndroidRotation.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/AndroidRotation.h
     ${CMAKE_CURRENT_LIST_DIR}/src/IconButton.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/IconButton.h
     ${CMAKE_CURRENT_LIST_DIR}/resources/kemu.qrc)
 target_include_directories(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
 option(KEMU_GUI_TESTS "Include opt-in live VM UI checks" OFF)
 if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
-    target_sources(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/LiveGuiChecks.cpp)
+    target_sources(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/LiveGuiChecks.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/tests/RotationGuiChecks.cpp)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
         TARGET_DIRECTORY aemu-ui-qt PROPERTIES COMPILE_DEFINITIONS KEMU_GUI_TESTS=1)
 endif()
@@ -115,6 +118,10 @@ if(WINDOWS_MSVC_X86_64)
     target_link_libraries(kemu-update-ui-tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets bcrypt winhttp kemu-update-zip)
     set_target_properties(kemu-update-ui-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
     add_executable(kemu-restart-tests tests/RestartTests.cpp)
+    add_executable(kemu-rotation-tests tests/RotationTests.cpp)
+    target_compile_features(kemu-rotation-tests PRIVATE cxx_std_17)
+    target_link_libraries(kemu-rotation-tests PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+    set_target_properties(kemu-rotation-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
     target_compile_features(kemu-restart-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-restart-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(kemu-restart-tests PRIVATE Qt${QT_VERSION_MAJOR}::Core ws2_32)
