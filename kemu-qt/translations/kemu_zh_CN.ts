@@ -4,6 +4,10 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>Rotate</source>
+        <translation>旋转</translation>
+    </message>
+    <message>
         <location filename="../src/WindowChrome.cpp" line="310"/>
         <source>APK installation and file transfer are unavailable. The emulator can continue running.
 

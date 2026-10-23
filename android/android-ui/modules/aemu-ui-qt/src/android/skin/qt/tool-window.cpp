@@ -779,6 +779,12 @@ void ToolWindow::showVirtualSceneControls(bool show) {
 }
 
 void ToolWindow::onExtendedWindowCreated(ExtendedBaseWindow* extendedWindow) {
+    if (kemu::enabled()) {
+        // Kemu follows Android's display events; sensors only change device pose.
+        disconnect(extendedWindow->getVirtualSensorsPage(),
+                   SIGNAL(coarseOrientationChanged(SkinRotation)),
+                   mEmulatorWindow, SLOT(rotateSkin(SkinRotation)));
+    }
     if (auto userActionsCounter = mUserActionsCounter.lock()) {
         userActionsCounter->startCountingForExtendedWindow(extendedWindow);
     }

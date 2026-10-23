@@ -45,6 +45,19 @@ void IconButton::paintEvent(QPaintEvent*) {
     case Icon::Back: p.drawLine(QPointF(18, 12), QPointF(6, 12)); p.drawPolyline(QPolygonF{QPointF(11, 7), QPointF(6, 12), QPointF(11, 17)}); break;
     case Icon::Home: p.drawEllipse(QRectF(5.5, 5.5, 13, 13)); break;
     case Icon::Recents: p.drawRoundedRect(QRectF(5.5, 5.5, 13, 13), 2, 2); break;
+    case Icon::RotatePortrait:
+    case Icon::RotateLandscape:
+        p.save();
+        p.translate(12, 12);
+        if (m_icon == Icon::RotateLandscape) p.rotate(90);
+        p.drawRoundedRect(QRectF(-4, -7, 8, 14), 1.5, 1.5);
+        p.drawLine(QPointF(-1, 4.5), QPointF(1, 4.5));
+        p.restore();
+        p.drawArc(QRectF(1.5, 1.5, 21, 21), 25 * 16, 115 * 16);
+        p.drawPolyline(QPolygonF{QPointF(18, 5), QPointF(22, 7.5), QPointF(22.5, 3)});
+        p.drawArc(QRectF(1.5, 1.5, 21, 21), 205 * 16, 115 * 16);
+        p.drawPolyline(QPolygonF{QPointF(6, 19), QPointF(2, 16.5), QPointF(1.5, 21)});
+        break;
     case Icon::Settings: {
         QPainterPath gear;
         for (int tooth = 0; tooth < 8; ++tooth) {

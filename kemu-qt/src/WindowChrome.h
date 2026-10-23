@@ -36,6 +36,7 @@ private:
     void toggleMaximized();
     void requestResize();
     void pollBoot();
+    void rotateDevice();
     void writeDiagnostics();
     void checkAdb();
     void applyPendingWindowSize();
@@ -46,6 +47,7 @@ private:
     QWidget* mLoading = nullptr;
     QLabel* mLoadingText = nullptr;
     IconButton* mMaximize = nullptr;
+    IconButton* mRotate = nullptr;
     AndroidMute* mMute = nullptr;
     AndroidRotation* mRotation = nullptr;
     UpdateController* mUpdates = nullptr;

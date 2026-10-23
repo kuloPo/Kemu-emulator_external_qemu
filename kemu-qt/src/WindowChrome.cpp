@@ -23,7 +23,9 @@
 #include <QMessageBox>
 #include <QScreen>
 #include <QWindow>
+#include <cmath>
 #include "android/console.h"
+#include "android/hw-sensors.h"
 #include "host-common/hw-config.h"
 #include "android/emulation/control/globals_agent.h"
 #include "android/emulation/control/adb/AdbInterface.h"
@@ -42,6 +44,7 @@ namespace kemu {
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
+void startSensorRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 #endif
 bool enabled() {
 #ifdef _WIN32
@@ -162,6 +165,19 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
             side->addSpacing(5);
         }
     }
+    const auto* hardware = getConsoleAgents()->settings->hw();
+    const bool portrait = qstrcmp(hardware->hw_initialOrientation, "portrait") == 0;
+    mRotate = new IconButton(portrait ? Icon::RotatePortrait : Icon::RotateLandscape,
+        QCoreApplication::translate("Kemu", "Rotate"), mSidebar);
+    mRotate->setObjectName("KemuRotateDevice");
+    mRotate->setProperty("kemuLabel", QT_TRANSLATE_NOOP("Kemu", "Rotate"));
+    mRotate->setEnabled(false);
+    connect(mRotate, &QAbstractButton::clicked, this, [this] {
+        rotateDevice();
+        mDisplay->setFocus(Qt::OtherFocusReason);
+    });
+    side->addWidget(mRotate);
+    mButtons.append(mRotate);
     side->addStretch();
 #ifdef _WIN32
     mUpdates = new UpdateController(container,
@@ -206,7 +222,6 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     connect(&mBootPoll, &QTimer::timeout, this, &WindowChrome::pollBoot);
     mBootPoll.start(100);
     const QRect available = container->screen()->availableGeometry();
-    const auto* hardware = getConsoleAgents()->settings->hw();
     const auto sizing = windowSizing(
         QSize(hardware->hw_lcd_width, hardware->hw_lcd_height), available.size());
     container->setMinimumSize(sizing.minimum);
@@ -320,8 +335,32 @@ void WindowChrome::pollBoot() {
     });
 #ifdef KEMU_GUI_TESTS
     if (qEnvironmentVariableIsSet("KEMU_ROTATION_TEST_RESULTS")) startRotationGuiChecks(mContainer, mDisplay);
+    if (qEnvironmentVariableIsSet("KEMU_SENSOR_ROTATION_TEST_RESULTS")) startSensorRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_RESULTS")) startLiveGuiChecks(mContainer, mDisplay);
 #endif
+}
+
+void WindowChrome::rotateDevice() {
+    if (!mReady || mClosing) return;
+    const auto* sensors = getConsoleAgents()->sensors;
+    float x = 0.f, y = 0.f, z = 0.f;
+    float* current[] = {&x, &y, &z};
+    if (sensors->getPhysicalParameter(PHYSICAL_PARAMETER_ROTATION, current, 3,
+            PARAMETER_VALUE_TYPE_TARGET) != PHYSICAL_PARAMETER_STATUS_OK) {
+        qWarning("Kemu rotation: cannot read device pose");
+        return;
+    }
+    // Use the target so rapid clicks toggle correctly during interpolation.
+    const bool rotated = std::abs(z) < 45.f;
+    const float target[] = {0.f, 0.f, rotated ? 90.f : 0.f};
+    if (sensors->setPhysicalParameterTarget(PHYSICAL_PARAMETER_ROTATION, target, 3,
+            PHYSICAL_INTERPOLATION_SMOOTH) != PHYSICAL_PARAMETER_STATUS_OK) {
+        qWarning("Kemu rotation: cannot update device pose");
+        return;
+    }
+    const auto* hardware = getConsoleAgents()->settings->hw();
+    const bool portrait = (qstrcmp(hardware->hw_initialOrientation, "portrait") == 0) != rotated;
+    mRotate->setIconType(portrait ? Icon::RotatePortrait : Icon::RotateLandscape);
 }
 
 void WindowChrome::checkAdb() {
