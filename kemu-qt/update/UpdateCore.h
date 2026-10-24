@@ -12,7 +12,11 @@ using Json = nlohmann::json;
 inline constexpr const char* ReleasesUrl = "https://github.com/kuloPo/Kemu/releases";
 inline constexpr const char* HistoryUrl = "https://raw.githubusercontent.com/kuloPo/Kemu/main/version-history.json";
 struct Release { std::string version; std::vector<std::string> files; };
-struct Plan { std::string current, target; std::map<std::string, Release> files; };
+struct Plan {
+    std::string current, target;
+    std::map<std::string, Release> files;
+    bool requiresFullInstaller = false;
+};
 void require(bool ok, const std::string& message);
 void validateVersion(const std::string& version);
 int compareVersions(const std::string& a, const std::string& b);

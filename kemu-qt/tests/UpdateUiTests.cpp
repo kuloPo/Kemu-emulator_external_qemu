@@ -119,9 +119,65 @@ static void checkPerformanceLifecycle(const QString& root) {
     }
     qputenv("ANDROID_AVD_HOME",previous);
 }
+static void checkFullInstallerPrompt() {
+    using namespace kemu::update;
+    for (const bool intermediate : {false, true}) {
+        for (const bool automatic : {false, true}) {
+            QTemporaryDir temporary;
+            const fs::path root(temporary.path().toStdWString());
+            qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
+            qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
+            writeText(root/"VERSION.txt","v0.1.0\n");
+            Json history = {{"schema_version",1},{"releases",Json::array({
+                {{"version","v0.1.0"},{"files",Json::array()}},
+                {{"version","v0.2.0"},{"files",{"a.dll"}}}})}};
+            const auto stage = root/".kemu-update";
+            prepareUpdateTask(root,history);
+            writeText(stage/"payload/a.dll","cached");
+            writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
+            saveDownloadedUpdate(stage,resolve(history,"v0.1.0"));
+            history["releases"][1]["files"] = Json::array();
+            if (intermediate) history["releases"].push_back({{"version","v0.3.0"},{"files",{"a.dll"}}});
+            kemu::setUiLanguage(automatic ? "en" : "zh-CN");
+            QWidget window;
+            kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&]{return history;});
+            auto* dialog = window.findChild<QDialog*>("KemuSettings");
+            dialog->setAttribute(Qt::WA_DontShowOnScreen);
+            dialog->findChild<QCheckBox*>("KemuAutoUpdate")->setChecked(automatic);
+            bool offered = false, correct = false;
+            QEventLoop wait;
+            QTimer poll, deadline;
+            QObject::connect(&poll,&QTimer::timeout,[&] {
+                if (auto* box = window.findChild<QMessageBox*>()) {
+                    offered = box->objectName() == "KemuFullInstallerRequired";
+                    correct = box->text() == (automatic
+                        ? QStringLiteral("A major update is available. Please download the full installer.")
+                        : QStringLiteral("\u6709\u91cd\u5927\u66f4\u65b0\uff0c\u8bf7\u524d\u5f80\u4e0b\u8f7d\u5b8c\u6574\u7248\u3002"));
+                    correct = correct && box->buttons().size() == 2;
+                    box->reject(); wait.quit();
+                }
+            });
+            QObject::connect(&deadline,&QTimer::timeout,[&] {
+                for (auto* box : window.findChildren<QMessageBox*>()) box->reject();
+                wait.quit();
+            });
+            poll.start(10); deadline.start(5000);
+            dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
+            wait.exec(); controller.stop();
+            require(offered && correct,"Manual check must offer the translated full installer instead of cached installation");
+            require(readVersion(root)=="v0.1.0" && !fs::exists(root/".kemu-update-pending") &&
+                    !fs::exists(stage/"job.json") && !fs::exists(root/".kemu-update-history.tmp"),
+                    "Full installer check must not prepare an installation or leave downloaded history");
+        }
+    }
+}
 int main(int argc, char** argv) {
     QApplication app(argc, argv); app.setQuitOnLastWindowClosed(false); QTemporaryDir temporary;
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+    if (argc > 1 && QString::fromUtf8(argv[1]) == "major") {
+        try { checkFullInstallerPrompt(); std::cout << "Full installer UI checks passed\n"; return 0; }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     if (argc == 5 && QString::fromUtf8(argv[1]) == "growth") {
         qputenv("ANDROID_AVD_HOME",QByteArray(argv[2]));
         qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());

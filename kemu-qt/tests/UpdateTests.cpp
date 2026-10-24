@@ -31,6 +31,17 @@ int main(int argc, char** argv) {
         })}};
         auto plan = resolve(history,"v0.1.0"); check(plan.target == "v0.2.0", "Stable channel");
         check(plan.files.at("/vendor/lib64/a.so").version == "v0.1.2" && plan.files.at("/vendor/lib64/b.so").version == "v0.2.0", "Last writer selection");
+        check(!plan.requiresFullInstaller, "Current empty release and future prerelease must not block updates");
+        auto major = history;
+        major["releases"][3]["files"] = Json::array();
+        check(resolve(major,"v0.1.0").requiresFullInstaller, "Empty target requires full installer");
+        check(!resolve(major,"v0.2.0").requiresFullInstaller, "Latest installed version must not require reinstall");
+        major = history;
+        major["releases"][1]["files"] = Json::array();
+        auto blocked = resolve(major,"v0.1.0");
+        check(blocked.requiresFullInstaller && blocked.files.empty() && blocked.target == "v0.2.0",
+              "Intermediate empty release must block a later incremental update");
+        check(!resolve(major,"v0.1.1").requiresFullInstaller, "Older empty release must not block updates");
         rejects([&] { resolve(history,"v0.0.0"); });
         auto duplicate = history; duplicate["releases"].push_back(history["releases"][0]); rejects([&] { resolve(duplicate,"v0.1.0"); });
         auto bad = history; bad["releases"][1]["files"] = {"VERSION.txt"}; rejects([&] { resolve(bad,"v0.1.0"); });
@@ -78,13 +89,20 @@ int main(int argc, char** argv) {
         check(!loadDownloadedUpdate(root,restoredStage,restoredPlan), "Stale cache rejected after version change");
         writeText(root/"VERSION.txt","v0.1.0\n");
         auto newerHistory=cachedHistory;
-        newerHistory["releases"].push_back({{"version","v0.3.0"},{"files",Json::array()}});
+        newerHistory["releases"].push_back({{"version","v0.3.0"},{"files",{"a.dll"}}});
         prepareUpdateTask(root,newerHistory);
         check(!fs::exists(stage/"retained.zip") && readJson(stage/"task.json").at("to")=="v0.3.0", "New latest target must clear previous task");
         writeText(stage/"protected","rollback"); writeJson(root/".kemu-update-pending",{{"stage",".kemu-update"}});
         rejects([&] { prepareUpdateTask(root,cachedHistory); });
         check(readText(stage/"protected")=="rollback", "Do not clear unfinished installation");
         rejects([&] { clearUpdateDirectory(root, root); });
+        root = temp/"full-installer"; stage = root/".kemu-update";
+        writeText(root/"VERSION.txt","v0.1.0\n");
+        check(prepareUpdateTask(root,major).requiresFullInstaller && !fs::exists(stage),
+              "Full installer must not create an incremental task");
+        writeJson(stage/"history.json",major);
+        writeJson(stage/"downloaded.json",{{"schema_version",1},{"from","v0.1.0"},{"to","v0.2.0"},{"files",Json::array()}});
+        check(!loadDownloadedUpdate(root,restoredStage,restoredPlan), "Full installer must reject cached incremental updates");
         if (argc > 1) {
             fs::path fixtures=fs::u8path(argv[1]);
             extractPack(fixtures/"good.zip",temp/"good"); check(readText(temp/"good/Windows/a.dll")=="payload", "ZIP extraction");

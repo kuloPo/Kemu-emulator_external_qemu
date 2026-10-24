@@ -4,6 +4,18 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>Major update available</source>
+        <translation>有重大更新</translation>
+    </message>
+    <message>
+        <source>A major update is available. Please download the full installer.</source>
+        <translation>有重大更新，请前往下载完整版。</translation>
+    </message>
+    <message>
+        <source>Download full installer</source>
+        <translation>下载完整版</translation>
+    </message>
+    <message>
         <source>Show frame rate</source>
         <translation>显示帧率</translation>
     </message>

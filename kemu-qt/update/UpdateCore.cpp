@@ -79,6 +79,12 @@ Plan resolve(const Json& history, const std::string& current) {
     std::sort(releases.begin(), releases.end(), [](const Release& a, const Release& b) { return compareVersions(a.version, b.version) < 0; });
     Plan plan; plan.current = current; plan.target = current;
     for (const auto& r : releases) if (compareVersions(r.version, plan.target) > 0 && (current.find('-') != current.npos || r.version.find('-') == r.version.npos)) plan.target = r.version;
+    for (const auto& r : releases) {
+        if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0 && r.files.empty()) {
+            plan.requiresFullInstaller = true;
+            return plan;
+        }
+    }
     std::map<std::string, std::string> casing;
     for (const auto& r : releases) if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0) {
         for (const auto& path : r.files) {
@@ -163,6 +169,7 @@ void clearUpdateDirectory(const fs::path& root, const fs::path& directory) {
 Plan prepareUpdateTask(const fs::path& root, const Json& history) {
     require(!fs::exists(root / ".kemu-update-pending"), "Recover unfinished installation before checking updates");
     auto plan = resolve(history, readVersion(root));
+    if (plan.requiresFullInstaller) return plan;
     auto stage = root / ".kemu-update";
     bool reuse = false;
     if (fs::exists(stage)) {
@@ -202,6 +209,7 @@ bool loadDownloadedUpdate(const fs::path& root, fs::path& stage, Plan& plan) {
         auto current = readVersion(root);
         require(record.at("schema_version") == 1 && record.at("from") == current, "Stale downloaded update");
         auto selected = resolve(readJson(cached / "history.json"), current);
+        require(!selected.requiresFullInstaller, "This update requires the full installer");
         require(record.at("to") == selected.target && compareVersions(selected.target, current) > 0, "Invalid downloaded target");
         std::map<std::string, std::string> expected;
         for (const auto& [path, release] : selected.files) expected[path[0] == '/' ? "android" + path : "payload/" + path] = {};

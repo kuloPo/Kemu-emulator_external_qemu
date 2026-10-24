@@ -329,11 +329,27 @@ void UpdateController::check(bool automatic) {
         auto latest = mRoot / ".kemu-update-history.tmp";
         if (mHistory) writeJson(latest, mHistory());
         else download(HistoryUrl, latest, 8*1024*1024, [this] { return mCancel.load(); });
-        mPlan = prepareUpdateTask(mRoot, readJson(latest)); fs::remove(latest);
+        auto history = readJson(latest); fs::remove(latest);
+        mPlan = prepareUpdateTask(mRoot, history);
+        if (mPlan.requiresFullInstaller) return;
         mStage = mRoot / ".kemu-update";
         mDownloaded = loadDownloadedUpdate(mRoot, mStage, mPlan);
     }, [this, automatic] {
         mVersion->setText(QCoreApplication::translate("Kemu", "Current version: ") + QString::fromStdString(mPlan.current));
+        if (mPlan.requiresFullInstaller) {
+            const auto message = QCoreApplication::translate("Kemu", "A major update is available. Please download the full installer.");
+            status(message);
+            if (!automatic) {
+                UiMessageBox prompt(QMessageBox::Information, QCoreApplication::translate("Kemu", "Major update available"),
+                    message, QMessageBox::NoButton, mDialog);
+                prompt.setObjectName("KemuFullInstallerRequired");
+                auto* download = prompt.addButton(QCoreApplication::translate("Kemu", "Download full installer"), QMessageBox::AcceptRole);
+                prompt.addButton(QCoreApplication::translate("Kemu", "Cancel"), QMessageBox::RejectRole);
+                prompt.exec();
+                if (prompt.clickedButton() == download) QDesktopServices::openUrl(QUrl(QString::fromUtf8(ReleasesUrl)));
+            }
+            return;
+        }
         if (mDownloaded) {
             status(QCoreApplication::translate("Kemu", "Update ready. Click Check for updates to continue installation."));
             if (!automatic || mAutoUpdate->isChecked()) offerInstall();
