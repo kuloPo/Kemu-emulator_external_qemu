@@ -5,6 +5,7 @@
 #include <QSize>
 #include <QTimer>
 #include <QVector>
+#include <memory>
 
 class EmulatorContainer;
 class EmulatorQtWindow;
@@ -16,6 +17,7 @@ class QEvent;
 namespace kemu {
 class AndroidMute;
 class AndroidRotation;
+class FrameRateMonitor;
 class UpdateController;
 bool enabled();
 
@@ -40,12 +42,17 @@ private:
     void writeDiagnostics();
     void checkAdb();
     void applyPendingWindowSize();
+    void setShowFrameRate(bool show);
+    void updateFrameRate();
+    void layoutFrameRate();
     EmulatorContainer* mContainer;
     EmulatorQtWindow* mDisplay;
     QWidget* mTitle = nullptr;
     QWidget* mSidebar = nullptr;
     QWidget* mLoading = nullptr;
     QLabel* mLoadingText = nullptr;
+    QLabel* mFrameRate = nullptr;
+    std::unique_ptr<FrameRateMonitor> mFrameRateMonitor;
     IconButton* mMaximize = nullptr;
     IconButton* mRotate = nullptr;
     AndroidMute* mMute = nullptr;
@@ -54,6 +61,7 @@ private:
     QVector<IconButton*> mButtons;
     QTimer mResize;
     QTimer mBootPoll;
+    QTimer mFrameRatePoll;
     QSize mRequestedSize;
     QSize mNormalSizes[2];
     QSize mPendingWindowSize;

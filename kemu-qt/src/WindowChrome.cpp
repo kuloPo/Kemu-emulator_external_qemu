@@ -5,6 +5,8 @@
 #include "IconButton.h"
 #include "AndroidMute.h"
 #include "AndroidRotation.h"
+#include "FrameRateCounter.h"
+#include "FrameRateLabel.h"
 #ifdef _WIN32
 #include "UpdateController.h"
 #endif
@@ -22,11 +24,13 @@
 #include <QMouseEvent>
 #include <QMessageBox>
 #include <QScreen>
+#include <QSettings>
 #include <QWindow>
 #include <cmath>
 #include "android/console.h"
 #include "android/hw-sensors.h"
 #include "host-common/hw-config.h"
+#include "host-common/opengles.h"
 #include "android/emulation/control/globals_agent.h"
 #include "android/emulation/control/adb/AdbInterface.h"
 #include "android/skin/qt/emulator-container.h"
@@ -41,6 +45,23 @@
 static void initKemuResources() { Q_INIT_RESOURCE(kemu); }
 
 namespace kemu {
+class FrameRateMonitor final {
+public:
+    explicit FrameRateMonitor(gfxstream::RendererPtr renderer)
+        : mRenderer(std::move(renderer)), mListener([this](gfxstream::FrameBufferChangeEvent event) {
+            if (event.change == gfxstream::FrameBufferChange::FrameReady) mCounter.recordFrame();
+        }) {
+        mRenderer->addListener(&mListener);
+    }
+    ~FrameRateMonitor() { mRenderer->removeListener(&mListener); }
+    double sample() { return mCounter.sample(); }
+
+private:
+    gfxstream::RendererPtr mRenderer;
+    FrameRateCounter mCounter;
+    gfxstream::Renderer::FrameBufferChangeEventListener mListener;
+};
+
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
@@ -210,6 +231,19 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     loadingRow->addStretch();
     loading->addLayout(loadingRow);
     loading->addStretch();
+    // A native sibling stays above the renderer's native child window.
+    mFrameRate = new FrameRateLabel(container);
+    mFrameRate->setObjectName("KemuFrameRate");
+    mFrameRate->setStyleSheet("#KemuFrameRate { color: #b8f59b; background: #15191f; padding: 4px 8px; }");
+    applyUiFont(mFrameRate, uiFont(10, QFont::DemiBold));
+    mFrameRate->hide();
+    connect(&mFrameRatePoll, &QTimer::timeout, this, &WindowChrome::updateFrameRate);
+    display->installEventFilter(this);
+#ifdef _WIN32
+    mUpdates->showFrameRateChanged = [this](bool show) { setShowFrameRate(show); };
+#endif
+    setShowFrameRate(QSettings(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu")
+        .value("general/showFrameRate", false).toBool());
     mResize.setSingleShot(true);
     mResize.setInterval(0);
     connect(&mResize, &QTimer::timeout, this, [this] {
@@ -274,6 +308,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
 }
 
 WindowChrome::~WindowChrome() {
+    mFrameRateMonitor.reset();
 #ifdef _WIN32
     if (mInstanceHandle) CloseHandle(mInstanceHandle);
 #endif
@@ -288,6 +323,7 @@ void WindowChrome::layout() {
     mSidebar->setGeometry(width - 53, 41, 52, qMax(0, height - 42));
     mLoading->setGeometry(1, 41, qMax(0, width - 54), qMax(0, height - 42));
     if (!mReady || mClosing) mLoading->raise();
+    layoutFrameRate();
     mLayoutActive = false;
     requestResize();
 }
@@ -316,6 +352,40 @@ void WindowChrome::surfaceChanged() {
     mHaveSurface = true;
     requestResize();
     if (!mReady || mClosing) mLoading->raise();
+    layoutFrameRate();
+}
+
+void WindowChrome::setShowFrameRate(bool show) {
+    mFrameRatePoll.stop();
+    mFrameRateMonitor.reset();
+    mFrameRate->setText("FPS: --");
+    if (show && !mClosing) mFrameRatePoll.start(1000);
+    updateFrameRate();
+}
+
+void WindowChrome::updateFrameRate() {
+    if (mFrameRatePoll.isActive() && mReady && !mClosing) {
+        if (!mFrameRateMonitor) {
+            const auto& renderer = android_getOpenglesRenderer();
+            if (renderer) mFrameRateMonitor = std::make_unique<FrameRateMonitor>(renderer);
+        } else {
+            mFrameRate->setText(QString("FPS: %1").arg(qRound(mFrameRateMonitor->sample())));
+        }
+    }
+    layoutFrameRate();
+}
+
+void WindowChrome::layoutFrameRate() {
+    if (!mFrameRate) return;
+    const bool visible = mFrameRatePoll.isActive() && mReady && !mClosing;
+    if (visible) {
+        mFrameRate->adjustSize();
+        const QRect surface(mDisplay->mapTo(mContainer, QPoint()), mDisplay->size());
+        const QRect bounds = surface.intersected(mContainer->viewport()->geometry());
+        mFrameRate->move(bounds.topLeft() + QPoint(8, 8));
+    }
+    mFrameRate->setVisible(visible);
+    if (visible) mFrameRate->raise();
 }
 
 void WindowChrome::pollBoot() {
@@ -323,6 +393,7 @@ void WindowChrome::pollBoot() {
     mReady = true;
     mBootPoll.stop();
     mLoading->hide();
+    updateFrameRate();
     for (auto* button : mButtons) button->setEnabled(true);
     mDisplay->setFocus(Qt::OtherFocusReason);
     mRotation->start([this](int rotation) {
@@ -415,6 +486,9 @@ void WindowChrome::toggleMaximized() {
 }
 
 bool WindowChrome::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == mDisplay && (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
+        layoutFrameRate();
+    }
     if (watched == mTitle) {
         if (event->type() == QEvent::MouseButtonDblClick) {
             auto* mouse = static_cast<QMouseEvent*>(event);
@@ -440,6 +514,7 @@ void WindowChrome::beginClose() {
 #endif
     if (mClosing) return;
     mClosing = true;
+    setShowFrameRate(false);
     mBootPoll.stop();
     mResize.stop();
     mMute->cancel();

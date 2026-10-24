@@ -4,6 +4,10 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>Show frame rate</source>
+        <translation>显示帧率</translation>
+    </message>
+    <message>
         <source>Rotate</source>
         <translation>旋转</translation>
     </message>

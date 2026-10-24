@@ -17,6 +17,7 @@ public:
     void showSettings();
     void stop();
     std::function<void()> languageChanged;
+    std::function<void(bool)> showFrameRateChanged;
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 private:

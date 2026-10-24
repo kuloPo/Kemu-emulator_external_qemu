@@ -2,6 +2,8 @@
 #include "../src/UiLanguage.h"
 #include "../src/PerformancePage.h"
 #include "../src/WindowSizing.h"
+#include "../src/FrameRateCounter.h"
+#include "../src/FrameRateLabel.h"
 #include "../launcher/StorageConfig.h"
 #include <QComboBox>
 #include <QStackedWidget>
@@ -26,6 +28,45 @@ public:
 protected:
     void closeEvent(QCloseEvent* event) override { ++closes; event->accept(); }
 };
+static void checkFrameRateHitTesting() {
+    using kemu::update::require;
+    QWidget window(nullptr, Qt::Tool | Qt::WindowStaysOnTopHint);
+    window.setAttribute(Qt::WA_ShowWithoutActivating);
+    window.resize(240, 140);
+    QWidget display(&window);
+    display.setAttribute(Qt::WA_NativeWindow);
+    display.setGeometry(0, 0, 240, 140);
+    kemu::FrameRateLabel overlay(&window);
+    overlay.setStyleSheet("background: #15191f; color: #b8f59b;");
+    overlay.setGeometry(8, 8, 100, 30);
+    window.show();
+    display.show();
+    for (const auto* text : {"FPS: 60", "FPS: 120"}) {
+        overlay.setText(text);
+        overlay.show();
+        overlay.raise();
+        QEventLoop exposed;
+        QTimer::singleShot(100, &exposed, &QEventLoop::quit);
+        exposed.exec();
+        const auto handle = reinterpret_cast<HWND>(overlay.winId());
+        RECT rect{};
+        require(GetWindowRect(handle, &rect), "Cannot locate frame rate overlay");
+        const POINT point{(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+        if (WindowFromPoint(point) != reinterpret_cast<HWND>(display.winId())) {
+            std::cerr << "Frame rate hit test: actual=" << WindowFromPoint(point)
+                      << " display=" << reinterpret_cast<HWND>(display.winId())
+                      << " overlay=" << handle << " parent=" << reinterpret_cast<HWND>(window.winId())
+                      << " visible=" << IsWindowVisible(handle)
+                      << " style=" << GetWindowLongPtrW(handle, GWL_EXSTYLE) << '\n';
+        }
+        require(WindowFromPoint(point) == reinterpret_cast<HWND>(display.winId()),
+                "Native mouse hit testing must pass through the visible frame rate overlay");
+        require(window.childAt(overlay.geometry().center()) == &display,
+                "Qt mouse hit testing must pass through the frame rate overlay");
+        overlay.hide();
+        window.resize(260, 160);
+    }
+}
 static void checkPerformanceLifecycle(const QString& root) {
     using kemu::update::require;
     {
@@ -102,6 +143,17 @@ int main(int argc, char** argv) {
         return app.exec();
     }
     using kemu::update::require;
+    {
+        using namespace std::chrono;
+        const kemu::FrameRateCounter::Clock::time_point start{};
+        kemu::FrameRateCounter counter(start);
+        for (int frame = 0; frame < 30; ++frame) counter.recordFrame();
+        require(counter.sample(start) == 0.0, "Zero elapsed time must not consume frames");
+        require(counter.sample(start + milliseconds(500)) == 60.0, "Frame rate must use elapsed seconds");
+        require(counter.sample(start + seconds(1)) == 0.0, "Idle frame rate must return to zero");
+        for (int frame = 0; frame < 90; ++frame) counter.recordFrame();
+        require(counter.sample(start + milliseconds(2500)) == 60.0, "Delayed UI timers must use actual elapsed time");
+    }
     for (const auto screen : {QSize(1920,1040),QSize(1280,720),QSize(960,540)}) {
         for (const auto display : {QSize(1920,1080),QSize(1080,1920),QSize(1200,2560)}) {
             const auto sizing=kemu::windowSizing(display,screen);
@@ -179,6 +231,7 @@ int main(int argc, char** argv) {
     QTimer::singleShot(2400,&app,[&] {
         try {
             using kemu::update::require;
+            checkFrameRateHitTesting();
             auto* dialog=window.findChild<QDialog*>("KemuSettings"); require(dialog && dialog->isVisible(),"Settings dialog missing");
             require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->count()==3,"Update navigation missing");
             require(dialog->findChild<QPushButton*>("KemuCheckUpdate")->isEnabled(),"Check update disabled");
@@ -199,7 +252,24 @@ int main(int argc, char** argv) {
             auto* status=dialog->findChild<QLabel*>("KemuUpdateStatus");
             if (missing) require(status->text().isEmpty(),"Missing VERSION guidance");
             auto* automatic=dialog->findChild<QCheckBox*>("KemuAutoUpdate");
-            require(dialog->findChildren<QCheckBox*>().size() == 1 && automatic->text() == QStringLiteral("自动更新"), "Expected single automatic update checkbox");
+            require(automatic->text() == QStringLiteral("自动更新"), "Automatic update checkbox was not translated");
+            auto* showFrameRate = dialog->findChild<QCheckBox*>("KemuShowFrameRate");
+            require(showFrameRate && !showFrameRate->isChecked() && showFrameRate->isVisible(),
+                    "Frame rate option must default to off on the General page");
+            require(showFrameRate->text() == QStringLiteral("\u663e\u793a\u5e27\u7387"), "Frame rate option was not translated");
+            int frameRateChanges = 0;
+            bool frameRateVisible = false;
+            controller.showFrameRateChanged = [&](bool show) { ++frameRateChanges; frameRateVisible = show; };
+            for (const bool show : {true, false}) {
+                showFrameRate->click();
+                require(frameRateVisible == show && frameRateChanges == (show ? 1 : 2),
+                        "Frame rate option must apply immediately");
+                QWidget reopenedWindow;
+                kemu::UpdateController reopened(&reopenedWindow, [] { return QString(); }, [] { return QString(); });
+                require(reopenedWindow.findChild<QCheckBox*>("KemuShowFrameRate")->isChecked() == show,
+                        "Frame rate option must persist across controller recreation");
+            }
+            controller.showFrameRateChanged = {};
             if (missing) {
                 bool prompted = false;
                 QTimer::singleShot(0, [&] {
@@ -233,6 +303,7 @@ int main(int argc, char** argv) {
             languages->setCurrentIndex(languages->findData("en"));
             require(languageChanged && dialog->windowTitle() == "Settings" && tabs->item(0)->text() == "General", "Live English switch failed");
             require(automatic->text() == "Automatic updates", "Update page was not translated");
+            require(showFrameRate->text() == "Show frame rate", "Frame rate option did not switch to English");
             QSettings saved(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu");
             require(saved.value("general/language").toString() == "en", "Language was not saved");
             require(kemu::initializeUiLanguage(saved, QLocale("zh_CN")) == "en", "Relaunch must preserve choice");

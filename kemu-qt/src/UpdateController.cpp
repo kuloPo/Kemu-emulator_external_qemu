@@ -76,7 +76,18 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     // Create the popup before applying the shared font to all child widgets.
     language->view();
     language->setStyleSheet("QComboBox {background:#29323e;border:1px solid #465468;border-radius:7px;padding:9px 12px;} QComboBox QAbstractItemView {background:#29323e;color:#edf1f6;selection-background-color:#29456b;}");
-    generalColumn->addWidget(languageLabel); generalColumn->addWidget(language, 0, Qt::AlignLeft); generalColumn->addStretch();
+    generalColumn->addWidget(languageLabel); generalColumn->addWidget(language, 0, Qt::AlignLeft);
+    auto* showFrameRate = new UpdateCheckBox(general);
+    showFrameRate->setObjectName("KemuShowFrameRate");
+    showFrameRate->setChecked(QSettings(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu")
+        .value("general/showFrameRate", false).toBool());
+    generalColumn->addWidget(showFrameRate);
+    generalColumn->addStretch();
+    connect(showFrameRate, &QCheckBox::toggled, this, [this](bool on) {
+        QSettings(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu")
+            .setValue("general/showFrameRate", on);
+        if (showFrameRateChanged) showFrameRateChanged(on);
+    });
     auto* page = new QWidget(pages); pages->addWidget(page);
     connect(tabs, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex); tabs->setCurrentRow(0);
     auto* column = new QVBoxLayout(page); column->setSpacing(14);
@@ -106,13 +117,14 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     connect(mDialog, &QDialog::finished, this, [this, performance] {
         if (!mClosing) performance->closed(mDialog, mWindow, qpath(mRoot), !mBusy);
     });
-    auto retranslate = [this, tabs, languageLabel, performance] {
+    auto retranslate = [this, tabs, languageLabel, showFrameRate, performance] {
         tabs->item(1)->setText(QCoreApplication::translate("Kemu", "Performance"));
         performance->retranslate(); refreshStorage();
         mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings"));
         tabs->item(0)->setText(QCoreApplication::translate("Kemu", "General"));
         tabs->item(2)->setText(QCoreApplication::translate("Kemu", "Updates"));
         languageLabel->setText(QCoreApplication::translate("Kemu", "Language"));
+        showFrameRate->setText(QCoreApplication::translate("Kemu", "Show frame rate"));
         mAutoUpdate->setText(QCoreApplication::translate("Kemu", "Automatic updates"));
         mCheck->setText(QCoreApplication::translate("Kemu", "Check for updates"));
         mCancelButton->setText(QCoreApplication::translate("Kemu", "Cancel"));
