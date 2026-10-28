@@ -119,15 +119,15 @@ static inline int whpx_simd_decode(const uint8_t *code, size_t size,
         d.kind = 2;
         break;
     case 0x10:
-    case 0x11: /* MOVUPS / MOVUPD / legacy MOVSS */
-        if (pp > 2 || (pp == 2 && d.vex)) {
+    case 0x11: /* MOVUPS / MOVUPD / legacy MOVSS / MOVSD */
+        if (pp >= 2 && d.vex) {
             return 0;
         }
         d.store = op == 0x11;
-        d.scalar = pp == 2;
+        d.scalar = pp >= 2;
         d.kind = d.scalar ? 4 : 3;
         if (d.scalar) {
-            d.size = 4;
+            d.size = pp == 3 ? 8 : 4;
         }
         break;
     case 0xe7: /* MOVNTDQ */
@@ -232,7 +232,7 @@ static inline uint64_t whpx_simd_address(const WhpxSimdInsn *d,
 }
 
 /* VEX loads clear the rest of the architectural vector register; legacy
- * MOVSS memory loads clear XMM[127:32] while preserving the upper YMM/ZMM. */
+ * scalar memory loads clear XMM above the operand and preserve upper YMM/ZMM. */
 static inline void whpx_simd_load(const WhpxSimdInsn *d, uint8_t reg[64],
                                   const uint8_t *data)
 {

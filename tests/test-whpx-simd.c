@@ -45,6 +45,10 @@ int main(void)
     uint8_t movq[] = {0x66, 0x42, 0x0f, 0xd6, 0x04, 0x52};
     uint8_t movq_load[] = {0xf3, 0x0f, 0x7e, 0x07};
     uint8_t movd[] = {0x66, 0x0f, 0x7e, 0x07};
+    uint8_t movsd_store[] = {0xf2, 0x41, 0x0f, 0x11, 0x44, 0x24, 0x70};
+    uint8_t movsd_load[] = {0xf2, 0x44, 0x0f, 0x10, 0x4f, 0x03};
+    uint8_t vmovsd[] = {0xc5, 0xfb, 0x10, 0x07};
+    uint8_t movsd_regreg[] = {0xf2, 0x0f, 0x10, 0xc1};
     uint8_t sib[] = {0xf3, 0x47, 0x0f, 0x7f, 0x4c, 0xa5, 0xe0};
     uint8_t riprel[] = {0xf3, 0x0f, 0x6f, 0x05, 0xf0, 0xff, 0xff, 0xff};
     uint8_t fs32[] = {0x64, 0x67, 0xf3, 0x0f, 0x7f, 0x07};
@@ -81,6 +85,16 @@ int main(void)
     CHECK(d.size == 8 && !d.store);
     d = decode(movd, sizeof(movd));
     CHECK(d.size == 4 && d.store);
+    d = decode(movsd_store, sizeof(movsd_store));
+    CHECK(d.size == 8 && d.store && d.scalar && !d.aligned && !d.vex);
+    CHECK(d.reg == 0 && d.base == 12 && d.index == -1);
+    regs[12] = 0x7fe481d0;
+    CHECK(whpx_simd_address(&d, regs, 0, 0, 0) == 0x7fe48240);
+    d = decode(movsd_load, sizeof(movsd_load));
+    CHECK(d.size == 8 && !d.store && d.scalar && !d.aligned && !d.vex);
+    CHECK(d.reg == 9 && d.base == 7 && d.displacement == 3);
+    regs[7] = 0x1000;
+    CHECK(whpx_simd_address(&d, regs, 0, 0, 0) == 0x1003);
     regs[13] = 0x5000;
     regs[12] = 3;
     d = decode(sib, sizeof(sib));
@@ -100,6 +114,8 @@ int main(void)
     CHECK(whpx_simd_decode(badvvvv, sizeof(badvvvv), &d) == 0);
     CHECK(whpx_simd_decode(lock, sizeof(lock), &d) == 0);
     CHECK(whpx_simd_decode(evex, sizeof(evex), &d) == 0);
+    CHECK(whpx_simd_decode(vmovsd, sizeof(vmovsd), &d) == 0);
+    CHECK(whpx_simd_decode(movsd_regreg, sizeof(movsd_regreg), &d) == 0);
     memset(overlong, 0x67, sizeof(overlong));
     CHECK(whpx_simd_decode(overlong, sizeof(overlong), &d) == 0);
 
@@ -118,6 +134,16 @@ int main(void)
     whpx_simd_load(&d, vector, data);
     CHECK(!memcmp(vector, data, 4));
     for (i = 4; i < 16; ++i) {
+        CHECK(vector[i] == 0);
+    }
+    for (i = 16; i < 64; ++i) {
+        CHECK(vector[i] == 0xa5);
+    }
+    d = decode(movsd_load, sizeof(movsd_load));
+    memset(vector, 0xa5, sizeof(vector));
+    whpx_simd_load(&d, vector, data);
+    CHECK(!memcmp(vector, data, 8));
+    for (i = 8; i < 16; ++i) {
         CHECK(vector[i] == 0);
     }
     for (i = 16; i < 64; ++i) {

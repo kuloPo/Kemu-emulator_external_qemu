@@ -4,7 +4,7 @@ WHPX SIMD MMIO functional tests
 The WHPX fallback handles memory moves needed by the current x86_64 Android
 libc, compiler-inlined ANGLE copies/fills, and ARM64 libc translated by
 NativeBridge. It supports legacy and VEX MOVDQU, MOVDQA, MOVUPS/MOVUPD,
-MOVAPS/MOVAPD, MOVNTDQ, MOVD/MOVQ, plus legacy MOVSS. Only 64-bit execution
+MOVAPS/MOVAPD, MOVNTDQ, MOVD/MOVQ, plus legacy MOVSS/MOVSD. Only 64-bit execution
 mode is decoded; unsupported instructions continue to WinHvEmulation.
 
 Portable decoder/state checks

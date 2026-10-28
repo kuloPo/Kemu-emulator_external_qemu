@@ -46,6 +46,7 @@ SSE_STORE(store_aps, "movaps")
 SSE_STORE(store_ups, "movups")
 SSE_STORE(store_ntdq, "movntdq")
 SSE_STORE(store_ss, "movss")
+SSE_STORE(store_sd, "movsd")
 SSE_STORE(store_q, "movq")
 SSE_STORE(store_d, "movd")
 AVX_STORE(store_vdqu, "vmovdqu")
@@ -59,6 +60,22 @@ static void load_dqu(void *out, const void *p)
                      :
                      : "r"(out), "r"(p)
                      : "xmm9", "memory");
+}
+static void load_sd(void *out, const void *p)
+{
+    __asm__ volatile("pcmpeqb %%xmm9, %%xmm9\n\tmovsd (%1), %%xmm9\n\t"
+                     "movdqu %%xmm9, (%0)"
+                     :
+                     : "r"(out), "r"(p)
+                     : "xmm9", "memory");
+}
+static AVX void load_sd_preserve(void *out, const void *p, const void *seed)
+{
+    __asm__ volatile("vmovdqu (%2), %%ymm9\n\tmovsd (%1), %%xmm9\n\t"
+                     "vmovdqu %%ymm9, (%0)"
+                     :
+                     : "r"(out), "r"(p), "r"(seed)
+                     : "ymm9", "memory");
 }
 static AVX void load_vdqu(void *out, const void *p)
 {
@@ -131,6 +148,7 @@ int main(int argc, char **argv)
         {"MOVDQU", 16, 0, 0, store_dqu},   {"MOVDQA", 16, 1, 0, store_dqa},
         {"MOVAPS", 16, 1, 0, store_aps},   {"MOVUPS", 16, 0, 0, store_ups},
         {"MOVNTDQ", 16, 1, 0, store_ntdq}, {"MOVSS", 4, 0, 0, store_ss},
+        {"MOVSD", 8, 0, 0, store_sd},
         {"MOVQ", 8, 0, 0, store_q},        {"MOVD", 4, 0, 0, store_d},
         {"VMOVDQU", 32, 0, 1, store_vdqu}, {"VMOVDQA", 32, 1, 1, store_vdqa},
         {"VMOVAPS", 32, 1, 1, store_vaps}, {"VMOVNTDQ", 32, 1, 1, store_vntdq}};
@@ -192,7 +210,20 @@ int main(int argc, char **argv)
         load_dqu(output, (void *)(mem + off));
         CHECK(!memcmp(output, input, 16));
         ++total;
+        load_sd(output, (void *)(mem + off));
+        CHECK(!memcmp(output, input, 8));
+        for (k = 8; k < 16; ++k) {
+            CHECK(output[k] == 0);
+        }
+        ++total;
         if (avx) {
+            load_sd_preserve(output, (void *)(mem + off), input + 64);
+            CHECK(!memcmp(output, input, 8));
+            for (k = 8; k < 16; ++k) {
+                CHECK(output[k] == 0);
+            }
+            CHECK(!memcmp(output + 16, input + 80, 16));
+            ++total;
             load_vdqu(output, (void *)(mem + off));
             CHECK(!memcmp(output, input, 32));
             ++total;
@@ -222,6 +253,10 @@ int main(int argc, char **argv)
     load_dqu(output, (void *)(reverse + 4089));
     CHECK(!memcmp(output, input, 16));
     ++total;
+    store_sd((void *)(reverse + 4089), input);
+    load_sd(output, (void *)(reverse + 4089));
+    CHECK(!memcmp(output, input, 8));
+    ++total;
     if (avx) {
         store_vdqu((void *)(reverse + 4089), input);
         load_vdqu(output, (void *)(reverse + 4089));
@@ -237,6 +272,7 @@ int main(int argc, char **argv)
         ((volatile uint8_t *)guard)[k] = 0xa5;
     }
     expect_fault(store_dqu, guard + 4089, input);
+    expect_fault(store_sd, guard + 4093, input);
     for (k = 4080; k < 4096; ++k) {
         CHECK(((volatile uint8_t *)guard)[k] == 0xa5);
     }
