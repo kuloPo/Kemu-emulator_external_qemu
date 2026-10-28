@@ -159,6 +159,89 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
     require(invalidEncryption, "invalid encryption setting must not silently disable key validation");
 }
 
+static void checkStorageMove(const kemu::fs::path& temporary) {
+    namespace disk = kemu::storage;
+    const auto avd = temporary / "move/avd";
+    const auto destination = temporary / L"move/磁盘 space";
+    kemu::fs::create_directories(avd / "kemu.avd");
+    kemu::fs::create_directories(destination);
+    const auto original = disk::imagePath(avd);
+    { std::ofstream out(original,std::ios::binary); out << std::string(4096,'A'); }
+    disk::requestGrowth(avd,128); disk::applyGrowth(avd);
+    bool rejected = false;
+    try { disk::requestMove(avd,destination); } catch (...) { rejected = true; }
+    require(rejected,"Moving must wait for guest expansion to finish");
+    disk::completeGrowth(avd,disk::readRequest(avd));
+    {
+        std::fstream file(original,std::ios::binary | std::ios::in | std::ios::out);
+        file.seekp(127 * disk::GiB); file << "tail data";
+    }
+    for (const auto& directory : {original.parent_path(),temporary / "absent"}) {
+        rejected = false;
+        try { disk::requestMove(avd,directory); } catch (...) { rejected = true; }
+        require(rejected && !kemu::fs::exists(disk::moveRequestPath(avd)),"Invalid move destination was accepted");
+    }
+    const auto target = destination / "userdata-qemu.img";
+    { std::ofstream out(target); out << "existing disk"; }
+    rejected = false;
+    try { disk::requestMove(avd,destination); } catch (...) { rejected = true; }
+    require(rejected && read(target)=="existing disk","Move overwrote a destination disk");
+    kemu::fs::remove(target);
+    disk::requestMove(avd,destination);
+    require(disk::imagePath(avd)==original && kemu::fs::exists(original),"Request changed a running disk");
+    {
+        disk::Handle lock{CreateFileW(original.c_str(),GENERIC_READ,FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     nullptr,OPEN_EXISTING,0,nullptr)};
+        rejected = false;
+        try { disk::applyMove(avd); } catch (...) { rejected = true; }
+        require(rejected && disk::imagePath(avd)==original,"Move must require exclusive disk access");
+    }
+    disk::requestMove(avd,destination);
+    rejected = false;
+    try { disk::requestGrowth(avd,129); } catch (...) { rejected = true; }
+    require(rejected,"Expansion must not race a pending move");
+    rejected = false;
+    try { disk::applyMove(avd,[](int) { throw std::runtime_error("Simulated copy failure"); }); }
+    catch (...) { rejected = true; }
+    require(rejected && disk::imagePath(avd)==original && kemu::fs::is_empty(destination),
+            "Copy failure must preserve the original and remove the partial copy");
+    disk::requestMove(avd,destination);
+    int progress = -1;
+    require(disk::applyMove(avd,[&](int value) {
+        require(value>=progress && value<=100,"Invalid move progress"); progress=value;
+    }),"Pending move was ignored");
+    require(progress==100 && !kemu::fs::exists(original) && kemu::fs::equivalent(disk::imagePath(avd),target),
+            "Move did not switch to the verified copy");
+    require(!disk::applyMove(avd),"Completed move must not repeat");
+    const auto used = disk::usage(avd);
+    require(used.capacity==128*disk::GiB && used.allocated<1024*1024,"Move lost sparse allocation or capacity");
+    {
+        std::ifstream in(target,std::ios::binary);
+        std::string prefix(4096,'\0'); in.read(prefix.data(),prefix.size());
+        require(prefix==std::string(4096,'A'),"Move changed the disk header");
+        in.seekg(64 * disk::GiB); char hole=1; in.read(&hole,1);
+        require(in && hole==0,"Move changed a sparse hole");
+        in.seekg(127 * disk::GiB); std::string tail(9,'\0'); in.read(tail.data(),tail.size());
+        require(tail=="tail data","Move lost data near the end of the disk");
+    }
+    disk::requestGrowth(avd,129); disk::applyGrowth(avd);
+    require(kemu::fs::file_size(target)==129*disk::GiB,"Expansion did not use the moved disk");
+    disk::completeGrowth(avd,disk::readRequest(avd));
+    kemu::RuntimeConfig config;
+    config.avdRoot=avd; config.images=temporary / "move/images";
+    kemu::fs::create_directories(config.images);
+    std::ofstream(config.images / "advancedFeatures.ini") << "EncryptUserData=off\n";
+    const auto args=config.arguments();
+    const auto data=std::find(args.begin(),args.end(),L"-data");
+    require(data!=args.end() && kemu::fs::equivalent(*(data+1),target),"Launcher did not select the moved disk");
+    kemu::fs::remove(target);
+    rejected=false;
+    try { config.validate(); } catch (const std::exception& error) {
+        rejected=std::string(error.what()).find("configured data image is unavailable")!=std::string::npos;
+    }
+    require(rejected && !kemu::fs::exists(original),"Unavailable external disk must not reset user data");
+}
+
 int main(int argc, char** argv) {
     const auto temporary = kemu::fs::temp_directory_path() / (L"kemu-config-test-" + std::to_wstring(GetCurrentProcessId()));
     try {
@@ -172,6 +255,7 @@ int main(int argc, char** argv) {
         }
         checkEngineDiscovery(temporary);
         checkStorageGrowth(temporary);
+        checkStorageMove(temporary);
         kemu::RuntimeConfig config;
         // Exercise Unicode and spaces in both configuration and image paths.
         config.avdRoot = temporary / L"中文 path/avd";

@@ -58,14 +58,14 @@ std::string DeviceConfig::PerInstancePath(const char* file_name) {
     if (!getConsoleAgents()->settings->hw()->avd_name) {
         return std::string{file_name};
     }
-    char* avdPath(path_dirname(getConsoleAgents()->settings->hw()->disk_dataPartition_path));
+    const auto* avd = getConsoleAgents()->settings->avdInfo();
+    const char* avdPath = avd ? avdInfo_getContentPath(avd) : nullptr;
     if (!avdPath) {
         return std::string{file_name};
     }
     std::string modem_dir =
             android::base::PathUtils::join(avdPath, "modem_simulator");
     std::string file = android::base::PathUtils::join(modem_dir, file_name);
-    AFREE(avdPath);
     return file;
 }
 

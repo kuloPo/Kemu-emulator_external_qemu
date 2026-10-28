@@ -1,4 +1,5 @@
 #include "RuntimeConfig.h"
+#include "StorageLocation.h"
 #include <windows.h>
 #include <fstream>
 #include <stdexcept>
@@ -63,6 +64,8 @@ RuntimeConfig RuntimeConfig::discover(const fs::path& applicationDir, const fs::
 }
 
 void RuntimeConfig::validate() const {
+    if (fs::exists(storage::locationPath(avdRoot)) && !fs::is_regular_file(storage::imagePath(avdRoot)))
+        throw std::runtime_error("The configured data image is unavailable. Reconnect its drive: " + utf8(storage::imagePath(avdRoot).wstring()));
     if (hostRamGb() < 4) throw std::runtime_error("Kemu requires at least 4 GB of system RAM");
     const auto executable = engine / "qemu/windows-x86_64/qemu-system-x86_64.exe";
     if (!fs::is_regular_file(executable)) throw std::runtime_error("Missing Kemu runtime: " + utf8(executable.wstring()));
@@ -141,10 +144,13 @@ std::vector<std::wstring> RuntimeConfig::arguments() const {
     // enable encryption after validation skipped its key, or disable an encrypted image.
     const auto features = imageEncryptionEnabled(images) ?
         L"GuestAngle,EncryptUserData,-MultiDisplay" : L"GuestAngle,-EncryptUserData,-MultiDisplay";
-    return {L"-avd", L"kemu", L"-sysdir", images.wstring(), L"-port", L"5554",
+    std::vector<std::wstring> result{L"-avd", L"kemu", L"-sysdir", images.wstring(), L"-port", L"5554",
             L"-cores", std::to_wstring(performance.cores), L"-memory", std::to_wstring(performance.ramGb * 1024), L"-gpu", L"auto", L"-no-snapshot",
             L"-no-boot-anim", L"-no-metrics", L"-crash-report-mode", L"never",
             L"-selinux", L"permissive",
             L"-feature", features};
+    if (fs::exists(storage::locationPath(avdRoot)))
+        result.insert(result.end() - 2, {L"-data",storage::imagePath(avdRoot).wstring()});
+    return result;
 }
 }  // namespace kemu

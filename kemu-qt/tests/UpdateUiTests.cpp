@@ -1,6 +1,7 @@
 #include "../src/UpdateController.h"
 #include "../src/UiLanguage.h"
 #include "../src/PerformancePage.h"
+#include "../src/StorageMoveDialog.h"
 #include "../src/WindowSizing.h"
 #include "../src/FrameRateCounter.h"
 #include "../src/FrameRateLabel.h"
@@ -13,11 +14,13 @@
 #include <QLineEdit>
 #include <QDialog>
 #include <QFile>
+#include <QFileDialog>
 #include <QEventLoop>
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QProgressBar>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -174,6 +177,53 @@ static void checkFullInstallerPrompt() {
 int main(int argc, char** argv) {
     QApplication app(argc, argv); app.setQuitOnLastWindowClosed(false); QTemporaryDir temporary;
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
+    if (argc > 1 && QString::fromUtf8(argv[1]) == "move-progress") {
+        try {
+            using kemu::update::require;
+            for (const auto* language : {"en","zh-CN"}) {
+                kemu::setUiLanguage(language);
+                kemu::StorageMoveDialog dialog("D:/Kemu data/userdata-qemu.img");
+                dialog.setAttribute(Qt::WA_DontShowOnScreen); dialog.show();
+                dialog.setProgress(72); app.processEvents();
+                auto* bar=dialog.findChild<QProgressBar*>("KemuMoveProgress");
+                require(bar && bar->value()==72,"Migration progress missing");
+                require(dialog.palette().color(QPalette::Window)==QColor("#1b2028"),"Migration theme mismatch");
+                require(dialog.findChild<QLabel*>("KemuMoveStatus")->font().family()=="Microsoft YaHei","Migration font mismatch");
+                require(!dialog.close() && dialog.isVisible(),"Closing the progress window must not interrupt a disk move");
+                if (argc>2) require(dialog.grab().save(QString::fromUtf8(argv[2])+"."+language+".png"),"Cannot render migration progress");
+            }
+            const auto avd=std::filesystem::path(temporary.path().toStdWString()) / "avd";
+            const auto target=std::filesystem::path(temporary.path().toStdWString()) / "target";
+            std::filesystem::create_directories(avd / "kemu.avd"); std::filesystem::create_directories(target);
+            { std::ofstream file(kemu::storage::imagePath(avd),std::ios::binary); file << std::string(4096,'A'); }
+            kemu::storage::requestGrowth(avd,128); kemu::storage::applyGrowth(avd);
+            kemu::storage::completeGrowth(avd,kemu::storage::readRequest(avd));
+            kemu::storage::requestMove(avd,target);
+            kemu::StorageMoveDialog dialog(QString::fromStdWString(target.wstring()));
+            dialog.setAttribute(Qt::WA_DontShowOnScreen);
+            require(dialog.move(avd)==0 && std::filesystem::equivalent(kemu::storage::imagePath(avd),target / "userdata-qemu.img"),
+                    "The progress window did not complete the disk migration");
+            const auto blocked=target.parent_path() / "blocked";
+            std::filesystem::create_directories(blocked);
+            kemu::storage::requestMove(avd,blocked);
+            { std::ofstream file(blocked / "userdata-qemu.img"); file << "existing disk"; }
+            kemu::StorageMoveDialog failed(QString::fromStdWString(blocked.wstring()));
+            failed.setAttribute(Qt::WA_DontShowOnScreen);
+            QTimer dismiss;
+            bool warned=false;
+            QObject::connect(&dismiss,&QTimer::timeout,[&] {
+                if (auto* prompt=failed.findChild<QMessageBox*>(); prompt && prompt->isVisible()) {
+                    warned=true; prompt->accept();
+                }
+            });
+            dismiss.start(20);
+            require(failed.move(avd)==1 && warned &&
+                    std::filesystem::equivalent(kemu::storage::imagePath(avd),target / "userdata-qemu.img"),
+                    "Migration errors must keep the saved disk and show a dismissible warning");
+            dismiss.stop();
+            std::cout << "Migration progress UI and worker checks passed\n"; return 0;
+        } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     if (argc > 1 && QString::fromUtf8(argv[1]) == "major") {
         try { checkFullInstallerPrompt(); std::cout << "Full installer UI checks passed\n"; return 0; }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
@@ -394,6 +444,32 @@ int main(int argc, char** argv) {
             auto* cpuSlider = dialog->findChild<QSlider*>("KemuCpuSlider");
             auto* ram = dialog->findChild<QSpinBox*>("KemuRam");
             auto* ramSlider = dialog->findChild<QSlider*>("KemuRamSlider");
+            auto* move = dialog->findChild<QPushButton*>("KemuMoveDisk");
+            auto* diskPath = dialog->findChild<QLabel*>("KemuStoragePath");
+            app.processEvents();
+            require(move && move->isEnabled() && diskPath &&
+                    diskPath->toolTip()==QDir::toNativeSeparators(QString::fromStdWString(kemu::storage::imagePath(storageRoot).wstring())),
+                    "Current disk path or Move button missing");
+            for (const auto* language : {"en","zh-CN"}) {
+                languages->setCurrentIndex(languages->findData(language)); app.processEvents();
+                require(expand->size()==ram->size() && move->size()==ram->size(),"Disk buttons must match the RAM input size");
+                require(diskPath->mapTo(dialog,QPoint()).y()>storage->mapTo(dialog,QPoint()).y(),"Disk path must be below capacity");
+                require(move->mapTo(dialog,QPoint()).x()>diskPath->mapTo(dialog,QPoint()).x(),"Move must be to the right of the path");
+                if (argc>2) require(dialog->grab().save(QString::fromUtf8(argv[2])+".disk-"+language+".png"),"Cannot render disk controls");
+            }
+            QApplication::setAttribute(Qt::AA_DontUseNativeDialogs,true);
+            bool selectedFolder=false;
+            QTimer pickerCloser;
+            QObject::connect(&pickerCloser,&QTimer::timeout,[&] {
+                if (auto* picker=dialog->findChild<QFileDialog*>(); picker && picker->isVisible()) {
+                    selectedFolder=true; picker->reject();
+                }
+            });
+            pickerCloser.start(20);
+            move->click();
+            pickerCloser.stop();
+            require(selectedFolder && !kemu::update::fs::exists(kemu::storage::moveRequestPath(storageRoot)),
+                    "Cancelling the folder picker must not queue a disk move");
             require(cpu->minimum()==1 && cpu->maximum()==kemu::hostCpuCount(), "CPU range mismatch");
             require(ram->minimum()==4 && ram->maximum()==kemu::hostRamGb(), "RAM range mismatch");
             cpuSlider->setValue(cpuSlider->maximum()); require(cpu->value()==cpuSlider->maximum(), "CPU slider did not update input");

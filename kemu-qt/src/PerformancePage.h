@@ -7,6 +7,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -118,13 +119,23 @@ public:
         };
         resource("KemuCpu",QT_TRANSLATE_NOOP("Kemu","CPU"),1,hostCpuCount(),config.cores,mCores);
         resource("KemuRam",QT_TRANSLATE_NOOP("Kemu","RAM"),4,(std::max)(4,hostRamGb()),config.ramGb,mRam); mRam->setSuffix(" G");
-        auto* storage = new QWidget(this); auto* storageRow = new QHBoxLayout(storage);
+        auto* storage = new QWidget(this); auto* storageRow = new QGridLayout(storage);
         storageRow->setContentsMargins(0,0,0,0); storageRow->setSpacing(12);
         mStorage = new QLabel(storage); mStorage->setObjectName("KemuStorageUsage");
         mExpand = new QPushButton(storage); mExpand->setObjectName("KemuExpandDisk"); mExpand->setEnabled(false);
-        storageRow->addWidget(mStorage,1); storageRow->addWidget(mExpand);
+        mDiskPath = new QLabel(storage); mDiskPath->setObjectName("KemuStoragePath");
+        mDiskPath->setTextFormat(Qt::PlainText);
+        mDiskPath->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Preferred);
+        mDiskPath->installEventFilter(this);
+        mMove = new QPushButton(storage); mMove->setObjectName("KemuMoveDisk"); mMove->setEnabled(false);
+        for (auto* button : {mExpand,mMove}) button->setStyleSheet("padding:0px 5px;");
+        mRam->installEventFilter(this);
+        storageRow->setColumnStretch(0,1);
+        storageRow->addWidget(mStorage,0,0); storageRow->addWidget(mExpand,0,1);
+        storageRow->addWidget(mDiskPath,1,0); storageRow->addWidget(mMove,1,1);
         row(storage,QT_TRANSLATE_NOOP("Kemu","Storage"));
         connect(mExpand,&QPushButton::clicked,this,[this] { if (expandStorage) expandStorage(); });
+        connect(mMove,&QPushButton::clicked,this,[this] { if (moveStorage) moveStorage(); });
         connect(mResolution,&QButtonGroup::idClicked,this,[this](int id) {
             if (id == 4) { const int width=mCustomWidth, height=mCustomHeight; mWidth->setValue(width); mHeight->setValue(height); }
             updateResolution();
@@ -153,11 +164,15 @@ public:
         mOrientation->button(0)->setText(QCoreApplication::translate("Kemu","Landscape"));
         mOrientation->button(1)->setText(QCoreApplication::translate("Kemu","Portrait"));
         mExpand->setText(QCoreApplication::translate("Kemu","Expand disk"));
+        mMove->setText(QCoreApplication::translate("Kemu","Move"));
     }
-    void setStorage(const QString& text, bool enabled) {
+    void setStorage(const QString& text, bool enabled, const QString& path, bool movable) {
         mStorage->setText(text); mExpand->setEnabled(enabled);
+        mDiskPath->setToolTip(QDir::toNativeSeparators(path));
+        mDiskPath->setAccessibleName(QDir::toNativeSeparators(path));
+        updateDiskPath(); mMove->setEnabled(movable);
     }
-    std::function<void()> expandStorage;
+    std::function<void()> expandStorage, moveStorage;
     bool save(QDialog* dialog) {
         for (auto* input : {mWidth,mHeight,mFps,mCores,mRam}) input->interpretText();
         updateResolution(); updateFps();
@@ -189,7 +204,18 @@ public:
             }
         }
     }
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == mRam && event->type() == QEvent::Resize)
+            for (auto* button : {mExpand,mMove}) button->setFixedSize(mRam->size());
+        if (watched == mDiskPath && (event->type() == QEvent::Resize || event->type() == QEvent::FontChange))
+            updateDiskPath();
+        return QWidget::eventFilter(watched,event);
+    }
 private:
+    void updateDiskPath() {
+        mDiskPath->setText(mDiskPath->fontMetrics().elidedText(mDiskPath->toolTip(),Qt::ElideMiddle,mDiskPath->contentsRect().width()));
+    }
     void updateResolutionLabels() {
         for (int i=0;i<4;++i) {
             const auto& size = PerformanceConfig::sizes[i];
@@ -226,8 +252,8 @@ private:
     QButtonGroup *mResolution, *mFpsMode, *mOrientation;
     QSpinBox *mWidth, *mHeight, *mFps, *mCores, *mRam;
     QWidget* mDimensions;
-    QLabel* mStorage;
-    QPushButton* mExpand;
+    QLabel *mStorage, *mDiskPath;
+    QPushButton *mExpand, *mMove;
     int mCustomWidth, mCustomHeight, mCustomFps;
 };
 }

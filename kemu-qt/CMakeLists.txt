@@ -26,6 +26,7 @@ if(KEMU_LUPDATE_EXECUTABLE)
             ${CMAKE_CURRENT_LIST_DIR}/src/UiLanguage.cpp
             ${CMAKE_CURRENT_LIST_DIR}/src/PerformancePage.h
             ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/src/StorageMoveDialog.cpp
             -no-obsolete -ts ${KEMU_TRANSLATION_TS}
         VERBATIM)
 endif()
@@ -87,6 +88,7 @@ if(WINDOWS_MSVC_X86_64)
     android_license(TARGET kemu-update-zip LIBNAME minizip URL None SPDX Zlib LICENSE None LOCAL "${KEMU_ZLIB}/LICENSE")
     android_license(TARGET bcrypt winhttp shell32 libcmt libcpmt libvcruntime libucrt LIBNAME None SPDX None LICENSE None LOCAL None)
     target_sources(aemu-ui-qt PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/src/StorageMoveDialog.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.h
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateCore.cpp
@@ -113,13 +115,13 @@ if(WINDOWS_MSVC_X86_64)
 endif()
 
 if(WINDOWS_MSVC_X86_64)
-    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp src/StorageMoveDialog.cpp resources/kemu.qrc update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
     add_dependencies(kemu-update-ui-tests kemu-translations)
     target_compile_features(kemu-update-ui-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-ui-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(kemu-update-ui-tests PRIVATE ${KEMU_JSON})
     target_link_libraries(kemu-update-ui-tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets bcrypt winhttp kemu-update-zip)
-    set_target_properties(kemu-update-ui-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+    set_target_properties(kemu-update-ui-tests PROPERTIES AUTOMOC OFF AUTORCC ON AUTOUIC OFF)
     add_executable(kemu-restart-tests tests/RestartTests.cpp)
     add_executable(kemu-rotation-tests tests/RotationTests.cpp)
     target_compile_features(kemu-rotation-tests PRIVATE cxx_std_17)

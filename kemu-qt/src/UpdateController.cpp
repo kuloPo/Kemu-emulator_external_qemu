@@ -12,6 +12,7 @@
 #include <QElapsedTimer>
 #include <QFont>
 #include <QFontDatabase>
+#include <QFileDialog>
 #include <QPainter>
 #include <QStyleOptionButton>
 #include <QDesktopServices>
@@ -110,6 +111,7 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     auto* performance = new PerformancePage(pages); pages->insertWidget(1,performance);
     mPerformance = performance;
     performance->expandStorage = [this] { expandStorage(); };
+    performance->moveStorage = [this] { moveStorage(); };
     auto* storageTimer = new QTimer(this); storageTimer->setInterval(2000);
     connect(storageTimer,&QTimer::timeout,this,[this] { if (mDialog->isVisible()) refreshStorage(); });
     storageTimer->start();
@@ -171,7 +173,9 @@ void UpdateController::refresh() {
     refreshStorage();
 }
 void UpdateController::refreshStorage() {
+    QString path;
     try {
+        path = qpath(storage::imagePath(mAvd));
         const auto used = storage::usage(mAvd);
         QString text = QString("%1G/%2G")
             .arg(double(used.allocated) / storage::GiB,0,'f',1)
@@ -179,10 +183,41 @@ void UpdateController::refreshStorage() {
         const auto pending = storage::readRequest(mAvd);
         if (pending.target)
             text += QCoreApplication::translate("Kemu"," (expanding to %1G)").arg(pending.target / storage::GiB);
-        mPerformance->setStorage(text,!mBusy && !mClosing &&
-            (pending.target || used.capacity / storage::GiB < storage::MaxGiB));
+        const bool available = !mBusy && !mClosing && !fs::exists(storage::moveRequestPath(mAvd));
+        mPerformance->setStorage(text,available &&
+            (pending.target || used.capacity / storage::GiB < storage::MaxGiB),path,available && !pending.target);
     } catch (...) {
-        mPerformance->setStorage(QCoreApplication::translate("Kemu","Storage unavailable"),false);
+        mPerformance->setStorage(QCoreApplication::translate("Kemu","Storage unavailable"),false,path,false);
+    }
+}
+void UpdateController::moveStorage() {
+    if (mBusy || mClosing) return;
+    try {
+        const auto current = storage::imagePath(mAvd);
+        const auto directory = QFileDialog::getExistingDirectory(mDialog,
+            QCoreApplication::translate("Kemu","Choose a folder for the virtual disk"),qpath(current.parent_path()));
+        if (directory.isEmpty()) return;
+        const auto destination = storage::moveDestination(mAvd,fs::path(directory.toStdWString()));
+        UiMessageBox prompt(QMessageBox::Question,QCoreApplication::translate("Kemu","Move disk"),
+            QCoreApplication::translate("Kemu","Kemu will close, move the virtual disk to the folder below, and restart. This may take several minutes. Keep both drives connected until it finishes.") +
+            "\n\n" + QDir::toNativeSeparators(qpath(destination)),QMessageBox::NoButton,mDialog);
+        prompt.setObjectName("KemuStorageMove");
+        auto* confirm = prompt.addButton(QCoreApplication::translate("Kemu","Move and restart"),QMessageBox::AcceptRole);
+        auto* cancel = prompt.addButton(QCoreApplication::translate("Kemu","Cancel"),QMessageBox::RejectRole);
+        prompt.setDefaultButton(cancel); prompt.setEscapeButton(cancel); prompt.exec();
+        if (prompt.clickedButton() != confirm || !mPerformance->save(mDialog)) return;
+        storage::requestMove(mAvd,destination.parent_path());
+        if (!startDetachedProcess(qpath(mRoot / "Kemu.exe"),
+                {"--restart-pid",QString::number(GetCurrentProcessId())},qpath(mRoot))) {
+            fs::remove(storage::moveRequestPath(mAvd));
+            throw std::runtime_error("Cannot start the restart helper.");
+        }
+        mClosing = true; mWindow->close();
+    } catch (const std::exception& error) {
+        UiMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Move disk"),
+            QCoreApplication::translate("Kemu","Could not move the disk.") + "\n\n" +
+            QString::fromUtf8(error.what()),QMessageBox::Ok,mDialog);
+        prompt.exec(); refreshStorage();
     }
 }
 void UpdateController::storageFailure(const QString& error) {

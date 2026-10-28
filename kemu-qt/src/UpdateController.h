@@ -32,6 +32,7 @@ private:
               std::function<void(const QString&)> failed = {});
     void refreshStorage();
     void expandStorage();
+    void moveStorage();
     void finishStorageGrowth();
     void storageFailure(const QString& error);
     void prepare(const QString& adb, const QString& serial);

@@ -956,14 +956,14 @@ static void enter_qemu_main_loop(int argc, char** argv) {
 // the radio configs come from the image/<arch>/data/misc/modem_simulator
 // folder, always make a copy of that folder to avd/modem_simulator/ and create
 // the necessary dir strucutres that modem simulator expects.
-static bool create_modem_simulator_configs(AndroidHwConfig* hw,
+static bool create_modem_simulator_configs(const AvdInfo* avd, AndroidHwConfig* hw,
                                            const char* opticcprofile) {
-    ScopedCPtr<char> avd_dir(path_dirname(hw->disk_dataPartition_path));
+    const char* avd_dir = avdInfo_getContentPath(avd);
     if (!avd_dir) {
         return false;
     }
     std::string modem_config_dir =
-            PathUtils::join(avd_dir.get(), "modem_simulator");
+            PathUtils::join(avd_dir, "modem_simulator");
     std::string iccprofile_path = PathUtils::join(modem_config_dir.c_str(),
                                                   "iccprofile_for_sim0.xml");
     if (android_op_wipe_data) {
@@ -986,14 +986,14 @@ static bool create_modem_simulator_configs(AndroidHwConfig* hw,
     return path_exists(iccprofile_path.c_str());
 }
 
-static bool createInitalEncryptionKeyPartition(AndroidHwConfig* hw) {
-    ScopedCPtr<char> userdata_dir(path_dirname(hw->disk_dataPartition_path));
-    if (!userdata_dir) {
-        derror("no userdata_dir");
+static bool createInitalEncryptionKeyPartition(const AvdInfo* avd, AndroidHwConfig* hw) {
+    const char* avd_dir = avdInfo_getContentPath(avd);
+    if (!avd_dir) {
+        derror("no AVD content directory");
         return false;
     }
     hw->disk_encryptionKeyPartition_path =
-            path_join(userdata_dir.get(), "encryptionkey.img");
+            path_join(avd_dir, "encryptionkey.img");
     if (path_exists(hw->disk_encryptionKeyPartition_path)) {
         return true;  // keep the existing encryptionkey.img file
     }
@@ -1337,11 +1337,11 @@ static int startEmulatorWithMinConfig(int argc,
     return 0;
 }
 
-static std::string getWriteableFilename(const char* disk_dataPartition_path,
+static std::string getWriteableFilename(const AvdInfo* avd,
                                         const char* filename) {
-    ScopedCPtr<char> userdata_dir(path_dirname(disk_dataPartition_path));
-    if (userdata_dir) {
-        return PathUtils::join(userdata_dir.get(), filename);
+    const char* avd_dir = avdInfo_getContentPath(avd);
+    if (avd_dir) {
+        return PathUtils::join(avd_dir, filename);
     } else {
         return "";
     }
@@ -1400,7 +1400,14 @@ static std::string buildSoundhwParam(const int apiLevel,
 }
 
 extern "C" AndroidProxyCB* gAndroidProxyCB;
+#ifdef _WIN32
+namespace kemu { int runStorageMove(int argc, char** argv); }
+#endif
 extern "C" int main(int argc, char** argv) {
+#ifdef _WIN32
+    if (argc == 3 && strcmp(argv[1], "--kemu-move-storage") == 0)
+        return kemu::runStorageMove(argc, argv);
+#endif
 #ifndef _WIN32
     if (getenv("ANDROID_CLI") && strcmp(getenv("ANDROID_CLI"), "1") == 0) {
         if (setsid() == -1 && errno != EPERM) {
@@ -2224,7 +2231,7 @@ extern "C" int main(int argc, char** argv) {
     // create encryptionkey.img file if needed
     if (fc::isEnabled(fc::EncryptUserData)) {
         if (hw->disk_encryptionKeyPartition_path == NULL) {
-            if (!createInitalEncryptionKeyPartition(hw)) {
+            if (!createInitalEncryptionKeyPartition(avd, hw)) {
                 android_panic("Encryption is requested but failed to create "
                        "encrypt "
                        "partition.");
@@ -2464,8 +2471,7 @@ extern "C" int main(int argc, char** argv) {
 
         if (fc::isEnabled(fc::AndroidbootProps) ||
             fc::isEnabled(fc::AndroidbootProps2)) {
-            bootconfigInitrdPath = getWriteableFilename(
-                    hw->disk_dataPartition_path, "initrd");
+            bootconfigInitrdPath = getWriteableFilename(avd, "initrd");
             args.add2("-initrd", bootconfigInitrdPath.c_str());
         } else {
             args.add2("-initrd", hw->disk_ramdisk_path);
@@ -2480,8 +2486,7 @@ extern "C" int main(int argc, char** argv) {
     args.add(PartitionParameters::create(hw, avd));
 
     if (fc::isEnabled(fc::KernelDeviceTreeBlobSupport)) {
-        const std::string dtbFileName = getWriteableFilename(
-                hw->disk_dataPartition_path, "default.dtb");
+        const std::string dtbFileName = getWriteableFilename(avd, "default.dtb");
 
         if (android_op_wipe_data || !path_exists(dtbFileName.c_str())) {
             ::dtb::Params params;
@@ -2663,7 +2668,7 @@ extern "C" int main(int argc, char** argv) {
     }
 
     if (feature_is_enabled(kFeature_ModemSimulator) && !opts->ui_only) {
-        if (create_modem_simulator_configs(hw, opts->icc_profile)) {
+        if (create_modem_simulator_configs(avd, hw, opts->icc_profile)) {
             init_modem_simulator();
             bool isIpv4 = false;
             int modem_simulator_port = 0;

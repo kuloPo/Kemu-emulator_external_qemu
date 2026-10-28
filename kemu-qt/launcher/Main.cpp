@@ -59,6 +59,32 @@ void checkPorts() {
     WSACleanup();
     if (!available) throw std::runtime_error("Emulator ports 5554/5555 are in use. Close the existing instance first.");
 }
+void moveDisk(const kemu::RuntimeConfig& config, HANDLE lease) {
+    if (!kemu::fs::exists(kemu::storage::moveRequestPath(config.avdRoot))) return;
+    const auto runtime = config.engine / "qemu/windows-x86_64/qemu-system-x86_64.exe";
+    auto command = kemu::quoteArgument(runtime.wstring()) + L" --kemu-move-storage " +
+        kemu::quoteArgument(config.avdRoot.wstring());
+    SIZE_T bytes = 0;
+    InitializeProcThreadAttributeList(nullptr,1,0,&bytes);
+    std::vector<unsigned char> attributes(bytes);
+    auto* list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+    if (!InitializeProcThreadAttributeList(list,1,0,&bytes)) throw std::runtime_error("Cannot initialize disk move process attributes");
+    if (!UpdateProcThreadAttribute(list,0,PROC_THREAD_ATTRIBUTE_HANDLE_LIST,&lease,sizeof(lease),nullptr,nullptr)) {
+        DeleteProcThreadAttributeList(list);
+        throw std::runtime_error("Cannot pass the instance lease to the disk mover");
+    }
+    STARTUPINFOEXW startup{}; startup.StartupInfo.cb=sizeof(startup); startup.lpAttributeList=list;
+    PROCESS_INFORMATION process{};
+    const BOOL started = CreateProcessW(runtime.c_str(),command.data(),nullptr,nullptr,TRUE,
+        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,nullptr,config.engine.c_str(),&startup.StartupInfo,&process);
+    DeleteProcThreadAttributeList(list);
+    if (!started) throw std::runtime_error("Cannot open the disk move window");
+    Handle child{process.hProcess}, thread{process.hThread};
+    DWORD result = 2;
+    if (WaitForSingleObject(child.value,INFINITE) != WAIT_OBJECT_0 ||
+        !GetExitCodeProcess(child.value,&result) || result > 1)
+        throw std::runtime_error("The disk move window exited unexpectedly. Restart Kemu to continue.");
+}
 int launch() {
     std::wstring module(32768, L'\0');
     module.resize(GetModuleFileNameW(nullptr, module.data(), DWORD(module.size())));
@@ -103,6 +129,7 @@ int launch() {
         path += (config.engine / sub).wstring() + L';';
     }
     setEnv(L"PATH", path + environment(L"PATH"));
+    moveDisk(config,lease.value);
     // ADB discovery checks PATH, then platform-tools beside this launcher.
     // The SDK directory below is only needed by upstream AVD loading.
     auto sdk = config.engine;

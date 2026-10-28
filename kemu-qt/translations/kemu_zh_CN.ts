@@ -412,6 +412,54 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <translation>扩大磁盘</translation>
     </message>
     <message>
+        <source>Move</source>
+        <translation>移动</translation>
+    </message>
+    <message>
+        <source>Move disk</source>
+        <translation>移动磁盘</translation>
+    </message>
+    <message>
+        <source>Moving virtual disk</source>
+        <translation>正在移动虚拟磁盘</translation>
+    </message>
+    <message>
+        <source>Copying disk...</source>
+        <translation>正在复制磁盘…</translation>
+    </message>
+    <message>
+        <source>Verifying disk...</source>
+        <translation>正在校验磁盘…</translation>
+    </message>
+    <message>
+        <source>Finishing the move...</source>
+        <translation>正在完成迁移…</translation>
+    </message>
+    <message>
+        <source>Keep both drives connected. Kemu will restart automatically when the move finishes.</source>
+        <translation>请保持两个磁盘连接。迁移完成后，Kemu 将自动重启。</translation>
+    </message>
+    <message>
+        <source>Could not finish moving the disk. Kemu will reopen using the saved disk location.</source>
+        <translation>未能完成磁盘迁移。Kemu 将使用已保存的磁盘位置重新启动。</translation>
+    </message>
+    <message>
+        <source>Choose a folder for the virtual disk</source>
+        <translation>选择虚拟磁盘的存放文件夹</translation>
+    </message>
+    <message>
+        <source>Kemu will close, move the virtual disk to the folder below, and restart. This may take several minutes. Keep both drives connected until it finishes.</source>
+        <translation>Kemu 将关闭，将虚拟磁盘移动到以下文件夹，然后重新启动。移动可能需要几分钟，请在完成前保持两个磁盘连接。</translation>
+    </message>
+    <message>
+        <source>Move and restart</source>
+        <translation>移动并重启</translation>
+    </message>
+    <message>
+        <source>Could not move the disk.</source>
+        <translation>无法移动磁盘。</translation>
+    </message>
+    <message>
         <source>Storage unavailable</source>
         <translation>无法读取存储信息</translation>
     </message>

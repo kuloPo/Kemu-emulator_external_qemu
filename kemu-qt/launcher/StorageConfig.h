@@ -1,4 +1,5 @@
 #pragma once
+#include "StorageLocation.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <cstdint>
@@ -12,17 +13,9 @@ namespace fs = std::filesystem;
 constexpr uint64_t GiB = uint64_t{1024} * 1024 * 1024;
 constexpr uint64_t MaxGiB = 16383;
 
-inline fs::path imagePath(const fs::path& avd) { return avd / "kemu.avd/userdata-qemu.img"; }
 inline fs::path requestPath(const fs::path& avd) { return avd / "storage-growth.txt"; }
-inline void require(bool ok, const char* message) {
-    if (!ok) throw std::runtime_error(message);
-}
 struct Usage { uint64_t capacity, allocated; };
 struct Request { uint64_t original = 0, target = 0; };
-struct Handle {
-    HANDLE value;
-    ~Handle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
-};
 
 inline Usage usage(const fs::path& avd) {
     const auto image = imagePath(avd);
@@ -51,6 +44,7 @@ inline Request readRequest(const fs::path& avd) {
 }
 
 inline void requestGrowth(const fs::path& avd, uint64_t targetGiB) {
+    require(!fs::exists(moveRequestPath(avd)), "A disk move is pending.");
     require(!fs::exists(requestPath(avd)), "A storage expansion is already pending.");
     const auto current = usage(avd);
     require(targetGiB > 0 && targetGiB <= MaxGiB &&
