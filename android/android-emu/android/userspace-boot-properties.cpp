@@ -27,6 +27,7 @@
 #include "android/emulation/resizable_display_config.h"
 #include "host-common/FeatureControl.h"  // for isEnabled
 #include "host-common/Features.h"        // for AndroidbootProps2
+#include "host-common/MediaVideoEncoder.h"
 #include "android/hw-sensors.h"                     // for android_foldable_...
 #include "android/utils/debug.h"                    // for dwarning
 
@@ -743,6 +744,13 @@ std::vector<std::pair<std::string, std::string>> getUserspaceBootProperties(
         params.push_back({qemuHwcodecHevcdecProp, "2"});
         params.push_back({qemuHwcodecVpxdecProp, "2"});
     }
+
+    const uint32_t encoders = android::emulation::MediaVideoEncoder::supportedCodecs();
+    std::string encoderProp = qemuHwcodecAvcdecProp;
+    encoderProp.replace(encoderProp.size() - 6, 6, "avcenc");
+    if (encoders & 1) params.push_back({encoderProp, "2"});
+    encoderProp.replace(encoderProp.size() - 6, 6, "hevcenc");
+    if (encoders & 2) params.push_back({encoderProp, "2"});
 
     if (fc::isEnabled(fc::SupportPixelFold)) {
         if (android_foldable_hinge_configured() &&

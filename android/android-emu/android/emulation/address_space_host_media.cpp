@@ -85,6 +85,9 @@ void AddressSpaceHostMediaContext::save(base::Stream* stream) const {
 }
 
 bool AddressSpaceHostMediaContext::load(base::Stream* stream) {
+    // The encoder has no queued frames. Recreate its GPU session on the next
+    // request and return new sequence headers after restoring a snapshot.
+    mVideoEncoder.reset();
     deallocatePages(mGuestAddr, kNumPages);
     AS_DEVICE_DPRINT("Loading Host Media snapshot");
     mGuestAddr = stream->getBe64();
@@ -183,6 +186,17 @@ void AddressSpaceHostMediaContext::handleMediaRequest(AddressSpaceDevicePingInfo
                      (long long)(getAddrSlot(info->metadata)));
 
     switch (codecType) {
+        case MediaCodecType::H264Encoder:
+        case MediaCodecType::HevcEncoder:
+            // Encoders own an entire media mapping, never a decoder slot.
+            if (slot != 0 || info->phys_addr != mGuestAddr || !mHostBuffer) {
+                return;
+            }
+            if (!mVideoEncoder) {
+                mVideoEncoder.reset(new MediaVideoEncoder());
+            }
+            mVideoEncoder->handlePing(codecType, op, mHostBuffer);
+            break;
         case MediaCodecType::VP8Codec:
         case MediaCodecType::VP9Codec:
             if (!mVpxDecoder) {

@@ -22,6 +22,7 @@ android_add_library(
       android/emulation/MediaSnapshotState.cpp
       android/emulation/MediaTexturePool.cpp
       android/emulation/MediaVideoHelper.cpp
+      android/emulation/MediaVideoEncoder.cpp
       android/emulation/MediaVpxDecoder.cpp
       android/emulation/MediaVpxDecoderGeneric.cpp
       android/emulation/MediaVpxVideoHelper.cpp
@@ -70,3 +71,17 @@ android_target_link_libraries(
 android_target_link_libraries(
   android-emu-media windows PRIVATE ole32::ole32 setupapi::setupapi
                                     mfuuid::mfuuid)
+if(WIN32)
+  android_find_windows_library(d3d11)
+  android_find_windows_library(dxgi)
+  add_library(kemu-nvenc-headers INTERFACE)
+  android_license(
+    TARGET kemu-nvenc-headers
+    LIBNAME "NVIDIA NVENC API headers"
+    URL "https://github.com/FFmpeg/nv-codec-headers/tree/n13.0.19.0"
+    SPDX MIT
+    LICENSE "https://github.com/FFmpeg/nv-codec-headers/blob/n13.0.19.0/include/ffnvcodec/nvEncodeAPI.h"
+    LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/src/android/emulation/nvenc/LICENSE.txt")
+  target_link_libraries(android-emu-media PRIVATE kemu-nvenc-headers)
+endif()
+android_target_link_libraries(android-emu-media windows PRIVATE d3d11::d3d11 dxgi::dxgi)
