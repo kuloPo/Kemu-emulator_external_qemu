@@ -44,6 +44,7 @@ AddressSpaceHostMediaContext::AddressSpaceHostMediaContext(
 }
 
 AddressSpaceHostMediaContext::~AddressSpaceHostMediaContext() {
+    mVideoEncoder.reset();
     deallocatePages(mGuestAddr, kNumPages);
 }
 
@@ -56,6 +57,7 @@ AddressSpaceDeviceType AddressSpaceHostMediaContext::getDeviceType() const {
 }
 
 void AddressSpaceHostMediaContext::save(base::Stream* stream) const {
+    if (mVideoEncoder) mVideoEncoder->waitForIdle();
     AS_DEVICE_DPRINT("Saving Host Media snapshot");
     stream->putBe64(mGuestAddr);
     int numActiveDecoders = 0;
@@ -85,8 +87,8 @@ void AddressSpaceHostMediaContext::save(base::Stream* stream) const {
 }
 
 bool AddressSpaceHostMediaContext::load(base::Stream* stream) {
-    // The encoder has no queued frames. Recreate its GPU session on the next
-    // request and return new sequence headers after restoring a snapshot.
+    // Recreate the GPU session and sequence headers after restoring a snapshot.
+    // An old worker retains its own mapping until its last operation finishes.
     mVideoEncoder.reset();
     deallocatePages(mGuestAddr, kNumPages);
     AS_DEVICE_DPRINT("Loading Host Media snapshot");
@@ -121,6 +123,7 @@ bool AddressSpaceHostMediaContext::load(base::Stream* stream) {
 
 void AddressSpaceHostMediaContext::allocatePages(uint64_t phys_addr, int num_pages) {
     mHostBuffer = android::aligned_buf_alloc(kAlignment, num_pages * kPageSize);
+    mHostBufferOwner = std::shared_ptr<void>(mHostBuffer, android::aligned_buf_free);
     mControlOps->add_memory_mapping(
         phys_addr, mHostBuffer, num_pages * kPageSize);
     AS_DEVICE_DPRINT("Allocating host memory for media context: guest_addr 0x%" PRIx64 ", 0x%" PRIx64,
@@ -135,7 +138,7 @@ void AddressSpaceHostMediaContext::deallocatePages(uint64_t phys_addr,
 
     mControlOps->remove_memory_mapping(phys_addr, mHostBuffer,
                                        num_pages * kPageSize);
-    android::aligned_buf_free(mHostBuffer);
+    mHostBufferOwner.reset();
     mHostBuffer = nullptr;
     AS_DEVICE_DPRINT(
             "De-Allocating host memory for media context: guest_addr 0x%" PRIx64
@@ -195,7 +198,7 @@ void AddressSpaceHostMediaContext::handleMediaRequest(AddressSpaceDevicePingInfo
             if (!mVideoEncoder) {
                 mVideoEncoder.reset(new MediaVideoEncoder());
             }
-            mVideoEncoder->handlePing(codecType, op, mHostBuffer);
+            mVideoEncoder->handlePing(codecType, op, mHostBufferOwner);
             break;
         case MediaCodecType::VP8Codec:
         case MediaCodecType::VP9Codec:

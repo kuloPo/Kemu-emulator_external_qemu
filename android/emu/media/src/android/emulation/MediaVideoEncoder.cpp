@@ -3,9 +3,11 @@
 #include "host-common/MediaVideoEncoder.h"
 
 #include <cstdio>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "host-common/GoldfishVideoEncoderDefs.h"
@@ -27,6 +29,43 @@ using namespace goldfish_encoder;
 
 struct MediaVideoEncoder::Impl {
   std::mutex mutex;
+  std::condition_variable changed;
+  struct Job {
+    MediaCodecType codec;
+    MediaOperation operation;
+    Request request;
+    uint32_t sequence;
+    std::shared_ptr<void> memory;
+  };
+  Job pending = {};
+  bool busy = false;
+  bool stopping = false;
+
+  void process(Job& job);
+  void run() {
+    std::unique_lock<std::mutex> lock(mutex);
+    for (;;) {
+      changed.wait(lock, [this] { return stopping || busy; });
+      if (stopping) break;
+      Job job = std::move(pending);
+      lock.unlock();
+      process(job);
+      auto* memory = static_cast<uint8_t*>(job.memory.get());
+      memcpy(memory + kResponseOffset, &job.request, sizeof(job.request));
+      lock.lock();
+      busy = false;
+      // Publish only after all output writes. The guest waits outside its ioctl.
+#ifdef _WIN32
+      InterlockedExchange(reinterpret_cast<volatile LONG*>(
+                              memory + kCompletedSequenceOffset),
+                          static_cast<LONG>(job.sequence));
+#else
+      __atomic_store_n(reinterpret_cast<uint32_t*>(memory + kCompletedSequenceOffset),
+                       job.sequence, __ATOMIC_RELEASE);
+#endif
+      changed.notify_all();
+    }
+  }
 #ifdef _WIN32
   using CreateInstance = NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*);
   using GetVersion = NVENCSTATUS(NVENCAPI*)(uint32_t*);
@@ -355,8 +394,21 @@ struct MediaVideoEncoder::Impl {
 #endif
 };
 
-MediaVideoEncoder::MediaVideoEncoder() : mImpl(new Impl()) {}
-MediaVideoEncoder::~MediaVideoEncoder() = default;
+MediaVideoEncoder::MediaVideoEncoder() : mImpl(std::make_shared<Impl>()) {
+  std::thread([impl = mImpl] { impl->run(); }).detach();
+}
+MediaVideoEncoder::~MediaVideoEncoder() {
+  // Destruction can run inside the MMIO/device locks. GPU cleanup stays on the
+  // worker; its shared ownership also keeps an in-flight mapping alive.
+  std::lock_guard<std::mutex> lock(mImpl->mutex);
+  mImpl->stopping = true;
+  mImpl->changed.notify_all();
+}
+
+void MediaVideoEncoder::waitForIdle() {
+  std::unique_lock<std::mutex> lock(mImpl->mutex);
+  mImpl->changed.wait(lock, [this] { return !mImpl->busy; });
+}
 
 uint32_t MediaVideoEncoder::supportedCodecs() {
 #ifdef _WIN32
@@ -387,15 +439,35 @@ uint32_t MediaVideoEncoder::supportedCodecs() {
 }
 
 void MediaVideoEncoder::handlePing(MediaCodecType type, MediaOperation op,
-                                   void* memory) {
+                                   const std::shared_ptr<void>& memory) {
   std::lock_guard<std::mutex> lock(mImpl->mutex);
   // Copy untrusted guest fields once; do not validate and then reread them.
   Request r;
-  memcpy(&r, memory, sizeof(r));
+  memcpy(&r, memory.get(), sizeof(r));
+  uint32_t sequence = 0;
+  memcpy(&sequence, static_cast<uint8_t*>(memory.get()) + kSequenceOffset,
+         sizeof(sequence));
+  if (r.version != kVersion || !sequence) {
+    r.status = kBadRequest;
+  } else if (mImpl->busy || mImpl->stopping) {
+    r.status = kBusy;
+  } else {
+    mImpl->pending = {type, op, r, sequence, memory};
+    mImpl->busy = true;
+    r.status = kPending;
+  }
+  memcpy(memory.get(), &r, sizeof(r));
+  mImpl->changed.notify_all();
+}
+
+void MediaVideoEncoder::Impl::process(Job& job) {
+  Request& r = job.request;
+  const auto type = job.codec;
+  const auto op = job.operation;
   r.status = kUnavailable;
   r.outputSize = r.configSize = r.keyFrame = 0;
 #ifdef _WIN32
-  auto& impl = *mImpl;
+  auto& impl = *this;
   if (op == MediaOperation::DestroyContext || op == MediaOperation::Flush ||
       op == MediaOperation::Reset) {
     impl.close();
@@ -424,7 +496,7 @@ void MediaVideoEncoder::handlePing(MediaCodecType type, MediaOperation op,
                            r.matrix != impl.settings.matrix;
       if (!restart || impl.start(type, r)) {
         r.status = op != MediaOperation::EncodeImage ||
-                           impl.encode(r, static_cast<uint8_t*>(memory))
+                           impl.encode(r, static_cast<uint8_t*>(job.memory.get()))
                        ? kOk
                        : kEncodeFailed;
       }
@@ -437,7 +509,6 @@ void MediaVideoEncoder::handlePing(MediaCodecType type, MediaOperation op,
   (void)type;
   (void)op;
 #endif
-  memcpy(memory, &r, sizeof(r));
 }
 }  // namespace emulation
 }  // namespace android
