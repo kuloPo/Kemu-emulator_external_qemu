@@ -105,14 +105,16 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
     require(missingImage, "missing image must be reported instead of using old image layouts");
     for (const auto* name : {"build.prop", "kernel_cmdline.txt", "VerifiedBootParams.textproto"})
         std::ofstream(installed.images / name) << "metadata fixture";
-    std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData = off\nGuestAngle = off\n";
+    std::ofstream(installed.images / "advancedFeatures.ini") <<
+        "EncryptUserData = off\nGuestAngle = off\nVulkanBatchedDescriptorSetUpdate = off\n";
     // A complete runtime must validate without any external build-script marker.
     installed.validate();
     const auto arguments = installed.arguments();
     require(arguments.size() > 3 && arguments[2] == L"-sysdir" &&
             arguments[3] == (release / "system-img").wstring(), "engine must receive the system-img directory");
     require(arguments[arguments.size() - 2] == L"-feature" &&
-            arguments.back() == L"GuestAngle,-EncryptUserData,-MultiDisplay", "single-display features must override the image defaults");
+            arguments.back() == L"GuestAngle,VulkanBatchedDescriptorSetUpdate,-EncryptUserData,-MultiDisplay",
+            "default renderer and single-display features must override the image defaults");
     const auto selinux = std::find(arguments.begin(), arguments.end(), L"-selinux");
     require(selinux != arguments.end() && selinux + 1 != arguments.end() &&
             *(selinux + 1) == L"permissive", "the emulator must start with permissive SELinux");
@@ -143,13 +145,13 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
         require(rejected, "encrypted image must require encryptionkey.img");
         std::ofstream(installed.images / "encryptionkey.img") << "key fixture";
         installed.validate();
-        require(installed.arguments().back() == L"GuestAngle,EncryptUserData,-MultiDisplay", "encryption arguments must match validation");
+        require(installed.arguments().back() == L"GuestAngle,VulkanBatchedDescriptorSetUpdate,EncryptUserData,-MultiDisplay", "encryption arguments must match validation");
         kemu::fs::remove(installed.images / "encryptionkey.img");
     }
     for (const auto* setting : {"EncryptUserData=off\n", "# EncryptUserData=on\n", "EncryptUserData=on\nEncryptUserData=off\n"}) {
         std::ofstream(installed.images / "advancedFeatures.ini") << setting;
         installed.validate();
-        require(installed.arguments().back() == L"GuestAngle,-EncryptUserData,-MultiDisplay", "unencrypted images must not require a key");
+        require(installed.arguments().back() == L"GuestAngle,VulkanBatchedDescriptorSetUpdate,-EncryptUserData,-MultiDisplay", "unencrypted images must not require a key");
     }
     std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData=invalid\n";
     bool invalidEncryption = false;
@@ -318,7 +320,7 @@ int main(int argc, char** argv) {
         require(resolved.parent_path() == kemu::fs::canonical(kemu::fs::temp_directory_path()) &&
                 resolved.filename() == temporary.filename(), "unexpected cleanup path");
         kemu::fs::remove_all(resolved);
-        std::cout << "PASS: launcher-relative paths, required image metadata, conditional encryption key, GuestAngle arguments, preserved userdata, settings, Unicode paths, idempotence, atomic replacement and argument quoting\n";
+        std::cout << "PASS: launcher-relative paths, required image metadata, conditional encryption key, renderer feature arguments, preserved userdata, settings, Unicode paths, idempotence, atomic replacement and argument quoting\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << " (fixtures retained at " << temporary << ")\n";
