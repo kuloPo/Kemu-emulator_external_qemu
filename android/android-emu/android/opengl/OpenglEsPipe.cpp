@@ -21,6 +21,9 @@
 #include "android/loadpng.h"
 #include "android/opengl/GLProcessPipe.h"
 #include "android/opengles-pipe.h"
+#include "android/emulation/SharedReceiveQueue.h"
+#include "android/emulation/SharedTransmitQueue.h"
+#include "android/emulation/PipeDoorbellConsumer.h"
 #include "host-common/opengles.h"
 #include "android/snapshot/Loader.h"
 #include "android/snapshot/Saver.h"
@@ -283,6 +286,102 @@ public:
     //////////////////////////////////////////////////////////////////////////
     // Overriden AndroidPipe methods
 
+    int setupSharedReceive(PipeRxHost* host, PipeRxGuest* guest, PipeRxDirty dirty,
+                           bool restoring, void (*enter)(), void (*leave)()) {
+        if (std::atomic_load(&mSharedReceive) || !mChannel || mDataForReadingLeft) return -1;
+        mConsumerEnter = enter;
+        mConsumerLeave = leave;
+        std::atomic_store(&mSharedReceive, std::make_shared<android::SharedReceiveQueue>(
+                host, guest, dirty, [this] { signalWake(PIPE_WAKE_READ); }, restoring));
+        return 0;
+    }
+
+    int addSharedSegment(unsigned id, void* const* pages) {
+        auto queue = std::atomic_load(&mSharedReceive);
+        return queue && queue->add(id, pages) ? 0 : -1;
+    }
+
+    int activateSharedReceive() {
+        auto queue = std::atomic_load(&mSharedReceive);
+        if (!queue || !queue->activate()) return -1;
+        auto enter = mConsumerEnter;
+        auto leave = mConsumerLeave;
+        mChannel->setReceiveSink([queue, enter, leave](const void* data, size_t size) {
+            registerConsumerThread(enter, leave);
+            return queue->write(data, size);
+        });
+        return 0;
+    }
+
+    void creditSharedReceive() {
+        if (std::atomic_load(&mSharedReceive)) mChannel->notifyGuestWrite();
+    }
+
+    void setReceiveRunning(bool running) {
+        if (auto queue = std::atomic_load(&mSharedReceive)) queue->setRunning(running);
+        if (running) mChannel->notifyGuestWrite();
+    }
+
+    void armSharedReceive(uint32_t sequence) {
+        auto queue = std::atomic_load(&mSharedReceive);
+        if (queue) queue->arm(sequence);
+    }
+
+    void* guestWriteEvent() const { return mChannel->guestWriteEvent(); }
+
+    int setupSharedTransmit(PipeTxGuest* guest, PipeTxHost* host, PipeRxDirty dirty,
+                            bool restoring, void (*enter)(), void (*leave)()) {
+        if (std::atomic_load(&mSharedTransmit) || !mChannel) return -1;
+        mConsumerEnter = enter;
+        mConsumerLeave = leave;
+        std::atomic_store(&mSharedTransmit, std::make_shared<android::SharedTransmitQueue>(
+                guest, host, dirty, [this] { signalWake(PIPE_WAKE_WRITE); }, restoring));
+        return 0;
+    }
+
+    int addTransmitSegment(unsigned id, void* const* pages, unsigned count) {
+        auto queue = std::atomic_load(&mSharedTransmit);
+        return queue && queue->add(id, pages, count) ? 0 : -1;
+    }
+
+    int activateSharedTransmit() {
+        auto queue = std::atomic_load(&mSharedTransmit);
+        if (!queue || !queue->activate()) return -1;
+        auto enter = mConsumerEnter;
+        auto leave = mConsumerLeave;
+        mChannel->setGuestMemorySource([queue, enter, leave](void* destination, size_t size) {
+            registerConsumerThread(enter, leave);
+            return queue->read(destination, size);
+        });
+        return 0;
+    }
+
+    void kickSharedTransmit() { mChannel->notifyGuestWrite(); }
+
+    void setTransmitRunning(bool running) {
+        if (auto queue = std::atomic_load(&mSharedTransmit)) queue->setRunning(running);
+        if (running) mChannel->notifyGuestWrite();
+    }
+
+    void armSharedTransmit(uint32_t sequence) {
+        if (auto queue = std::atomic_load(&mSharedTransmit)) queue->arm(sequence);
+    }
+
+    void detachSharedTransmit() {
+        mChannel->setGuestMemorySource({});
+        if (auto queue = std::atomic_exchange(&mSharedTransmit,
+                std::shared_ptr<android::SharedTransmitQueue>{})) queue->close();
+    }
+
+    static void registerConsumerThread(void (*enter)(), void (*leave)()) {
+        struct ThreadRegistration {
+            explicit ThreadRegistration(void (*enter)(), void (*leave)()) : leave(leave) { enter(); }
+            ~ThreadRegistration() { leave(); }
+            void (*leave)();
+        };
+        static thread_local ThreadRegistration registration(enter, leave);
+    }
+
     virtual void onSave(android::base::Stream* stream) override {
         DD("%s: saving GLES pipe state for hwpipe=%p", __FUNCTION__, mHwPipe);
         stream->putBe32(mIsWorking);
@@ -297,6 +396,8 @@ public:
         D("%s", __func__);
         mIsWorking = false;
         mChannel->stop();
+        if (auto queue = std::atomic_load(&mSharedReceive)) queue->close();
+        if (auto queue = std::atomic_load(&mSharedTransmit)) queue->close();
         // Make sure there's no operation scheduled for this pipe instance to
         // run on the main thread.
         abortPendingOperation();
@@ -326,6 +427,7 @@ public:
 
     virtual int onGuestRecv(AndroidPipeBuffer* buffers,
                             int numBuffers) override {
+        if (std::atomic_load(&mSharedReceive)) return PIPE_ERROR_INVAL;
         DD("%s", __func__);
 
         // Consume the pipe's dataForReading, then put the next received data
@@ -569,6 +671,8 @@ private:
             return;
         }
         if ((state & ChannelState::Stopped) != 0) {
+            if (auto queue = std::atomic_load(&mSharedReceive)) queue->close();
+            if (auto queue = std::atomic_load(&mSharedTransmit)) queue->close();
             this->closeFromHost();
             return;
         }
@@ -577,6 +681,10 @@ private:
 
     // A RenderChannel pointer used for communication.
     RenderChannelPtr mChannel;
+    std::shared_ptr<android::SharedReceiveQueue> mSharedReceive;
+    std::shared_ptr<android::SharedTransmitQueue> mSharedTransmit;
+    void (*mConsumerEnter)() = nullptr;
+    void (*mConsumerLeave)() = nullptr;
 
     // Set to |true| if the pipe is in working state, |false| means we're not
     // initialized or the pipe is closed.
@@ -617,3 +725,72 @@ void android_opengles_pipe_set_recv_mode(int mode) {
     android::opengl::pipeSetRecvMode(mode);
 }
 
+static android::opengl::EmuglPipe* sharedReceivePipe(void* opaque) {
+    auto* pipe = static_cast<android::AndroidPipe*>(opaque);
+    return pipe && !strcmp(pipe->name(), "opengles")
+            ? static_cast<android::opengl::EmuglPipe*>(pipe) : nullptr;
+}
+
+int android_pipe_rx_setup(void* pipe, PipeRxHost* host, PipeRxGuest* guest,
+                          PipeRxDirty dirty, bool restoring, void (*enter)(), void (*leave)()) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->setupSharedReceive(host, guest, dirty, restoring, enter, leave) : -1;
+}
+int android_pipe_rx_add_segment(void* pipe, unsigned id, void* const* pages) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->addSharedSegment(id, pages) : -1;
+}
+int android_pipe_rx_activate(void* pipe) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->activateSharedReceive() : -1;
+}
+void android_pipe_rx_credit(void* pipe) {
+    auto* service = sharedReceivePipe(pipe);
+    if (service) service->creditSharedReceive();
+}
+void android_pipe_rx_arm(void* pipe, uint32_t sequence) {
+    auto* service = sharedReceivePipe(pipe);
+    if (service) service->armSharedReceive(sequence);
+}
+
+void* android_pipe_guest_write_event(void* pipe) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->guestWriteEvent() : nullptr;
+}
+
+int android_pipe_tx_setup(void* pipe, PipeTxGuest* guest, PipeTxHost* host,
+                          PipeRxDirty dirty, bool restoring, void (*enter)(), void (*leave)()) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->setupSharedTransmit(guest, host, dirty, restoring, enter, leave) : -1;
+}
+
+int android_pipe_tx_add_segment(void* pipe, unsigned id, void* const* pages, unsigned count) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->addTransmitSegment(id, pages, count) : -1;
+}
+
+int android_pipe_tx_activate(void* pipe) {
+    auto* service = sharedReceivePipe(pipe);
+    return service ? service->activateSharedTransmit() : -1;
+}
+
+void android_pipe_tx_kick(void* pipe) {
+    if (auto* service = sharedReceivePipe(pipe)) service->kickSharedTransmit();
+}
+
+void android_pipe_tx_arm(void* pipe, uint32_t sequence) {
+    if (auto* service = sharedReceivePipe(pipe)) service->armSharedTransmit(sequence);
+}
+
+void android_pipe_tx_detach(void* pipe) {
+    if (auto* service = sharedReceivePipe(pipe)) service->detachSharedTransmit();
+}
+
+void android_pipe_tx_set_running(void* pipe, bool running) {
+    if (auto* service = sharedReceivePipe(pipe)) service->setTransmitRunning(running);
+}
+
+
+void android_pipe_rx_set_running(void* pipe, bool running) {
+    if (auto* service = sharedReceivePipe(pipe)) service->setReceiveRunning(running);
+}

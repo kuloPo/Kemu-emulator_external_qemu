@@ -32,6 +32,11 @@ void* whpx_gpa2hva(uint64_t gpa, bool* found);
 
 int whpx_enabled(void);
 
+typedef struct WhpxDoorbell WhpxDoorbell;
+/* The consumer owns event and must keep it alive until unregistering. */
+WhpxDoorbell* whpx_doorbell_create(uint64_t gpa, uint32_t value, void* event);
+void whpx_doorbell_destroy(WhpxDoorbell* doorbell);
+
 #else /* CONFIG_WHPX */
 
 #define whpx_enabled() (0)

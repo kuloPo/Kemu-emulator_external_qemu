@@ -49,6 +49,10 @@ typedef int WINBOOL;
  * optionally.
  */
 #define LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(X) \
+  X(HRESULT, WHvRegisterPartitionDoorbellEvent, \
+        (WHV_PARTITION_HANDLE Partition, const WHV_DOORBELL_MATCH_DATA* MatchData, HANDLE EventHandle)) \
+  X(HRESULT, WHvUnregisterPartitionDoorbellEvent, \
+        (WHV_PARTITION_HANDLE Partition, const WHV_DOORBELL_MATCH_DATA* MatchData)) \
   X(HRESULT, WHvGetVirtualProcessorXsaveState, \
         (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, \
         PVOID Buffer, \

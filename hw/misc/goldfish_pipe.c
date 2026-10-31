@@ -31,6 +31,10 @@
 
 #include "host-common/goldfish_pipe.h"
 #include "host-common/android_pipe_base.h"
+#include "android/emulation/PipeSharedReceive.h"
+#include "android/emulation/PipeDoorbellProtocol.h"
+#include "android/emulation/PipeDoorbellConsumer.h"
+#include "android/emulation/PipeSharedTransmit.h"
 
 #include "qemu/osdep.h"
 #include "hw/hw.h"
@@ -40,6 +44,9 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "qemu/error-report.h"
+#include "qemu/rcu.h"
+#include "sysemu/sysemu.h"
+#include "sysemu/whpx.h"
 
 #include <assert.h>
 #include <glib.h>
@@ -297,6 +304,30 @@ typedef struct PipeCommand {
     };
 } PipeCommand;
 
+#define PIPE_RX_MAX_PAGES (2 + PIPE_RX_MAX_SEGMENTS * PIPE_RX_SEGMENT_PAGES)
+typedef struct PipeRxMapping {
+    uint64_t addresses[PIPE_RX_MAX_PAGES];
+    void* pages[PIPE_RX_MAX_PAGES];
+    unsigned count;
+    bool active;
+    VMChangeStateEntry* state_handler;
+} PipeRxMapping;
+
+static unsigned pipe_rx_mapped_pages;
+#define PIPE_RX_GLOBAL_PAGES (256U * 1024U * 1024U / PIPE_RX_PAGE_SIZE)
+
+typedef struct PipeTxMapping {
+    void* control[2];
+    uint64_t control_addresses[2];
+    unsigned control_count;
+    VMChangeStateEntry* state_handler;
+    GPtrArray* pages[PIPE_TX_MAX_SEGMENTS];
+    GArray* addresses[PIPE_TX_MAX_SEGMENTS];
+    GHashTable* seen;
+    unsigned segments;
+    bool active;
+} PipeTxMapping;
+
 struct GoldfishHwPipe {
     const AndroidPipeHwFuncs *vtbl;
     struct GoldfishHwPipe *wanted_next;
@@ -305,6 +336,12 @@ struct GoldfishHwPipe {
     uint32_t id;  // pipe ID is its index into the PipeDevice::pipes array
     unsigned char wanted;
     char closed;
+    PipeRxMapping* rx;
+    PipeTxMapping* tx;
+    bool doorbell_enabled;
+#ifdef CONFIG_WHPX
+    WhpxDoorbell* doorbell;
+#endif
     GoldfishHostPipe *host_pipe;
     uint64_t command_buffer_addr;
     PipeCommand* command_buffer;
@@ -484,6 +521,8 @@ void goldfish_pipe_signal_wake(void *pipe_raw, unsigned flags_raw) {
     }
 }
 
+static void pipe_doorbell_disable(HwPipe* pipe);
+
 void goldfish_pipe_close_from_host(void *pipe_raw) {
     GoldfishHwPipe *pipe = pipe_raw;
 
@@ -492,6 +531,7 @@ void goldfish_pipe_close_from_host(void *pipe_raw) {
 
     if (!pipe->closed) {
         pipe->closed = 1;
+        pipe_doorbell_disable(pipe);
         goldfish_pipe_signal_wake(pipe, GOLDFISH_PIPE_WAKE_CLOSED);
     }
 }
@@ -526,10 +566,26 @@ static HwPipe* hwpipe_new(uint32_t id, uint64_t channel, PipeDevice* dev) {
     return pipe;
 }
 
+static void pipe_tx_free(HwPipe* pipe);
+
 static void hwpipe_free(HwPipe* pipe, GoldfishPipeCloseReason reason) {
+    pipe_doorbell_disable(pipe);
+    if (pipe->tx && pipe->host_pipe) android_pipe_tx_detach(pipe->host_pipe);
+    if (pipe->rx && pipe->rx->state_handler)
+        qemu_del_vm_change_state_handler(pipe->rx->state_handler);
     if (pipe->host_pipe)
         service_ops->guest_close(pipe->host_pipe, reason);
 
+    if (pipe->rx) {
+        for (unsigned i = 0; i < pipe->rx->count; ++i) {
+            cpu_physical_memory_unmap(pipe->rx->pages[i], PIPE_RX_PAGE_SIZE,
+                                      i != 1, PIPE_RX_PAGE_SIZE);
+        }
+        pipe_rx_mapped_pages -= pipe->rx->count;
+        g_free(pipe->rx);
+    }
+
+    pipe_tx_free(pipe);
     g_free(pipe);
 }
 
@@ -646,6 +702,139 @@ static void* map_guest_buffer(hwaddr phys, size_t size, int is_write) {
 
     return ptr;
 }
+
+static void pipe_rx_dirty(void* address, size_t length) {
+    ram_addr_t offset;
+    MemoryRegion* region = memory_region_from_host(address, &offset);
+    if (region) {
+        memory_region_set_dirty(region, offset, length);
+    }
+}
+
+static void pipe_doorbell_disable(HwPipe* pipe) {
+#ifdef CONFIG_WHPX
+    if (!pipe->doorbell_enabled) return;
+    whpx_doorbell_destroy(pipe->doorbell);
+    pipe->doorbell = NULL;
+    pipe->doorbell_enabled = false;
+#endif
+}
+
+static bool pipe_doorbell_enable(HwPipe* pipe) {
+#ifdef CONFIG_WHPX
+    if (pipe->closed || !pipe->host_pipe) return false;
+    if (pipe->doorbell_enabled) return true;
+    if (!pipe->rx || !pipe->rx->active) return false;
+    hwaddr address = SYS_BUS_DEVICE(pipe->dev->ps)->mmio[0].addr;
+    void* event = android_pipe_guest_write_event(pipe->host_pipe);
+    if (address == (hwaddr)-1 || !event) return false;
+    pipe->doorbell = whpx_doorbell_create(address + PIPE_DOORBELL_REGISTER, pipe->id, event);
+    if (!pipe->doorbell) return false;
+    pipe->doorbell_enabled = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+static void pipe_rx_runstate(void* opaque, int running, RunState state) {
+    HwPipe* pipe = opaque;
+    android_pipe_rx_set_running(pipe->host_pipe, running);
+}
+
+static bool pipe_rx_map_page(PipeRxMapping* rx, uint64_t address) {
+    if ((address & (PIPE_RX_PAGE_SIZE - 1)) || rx->count >= PIPE_RX_MAX_PAGES ||
+        pipe_rx_mapped_pages >= PIPE_RX_GLOBAL_PAGES) return false;
+    for (unsigned i = 0; i < rx->count; ++i) {
+        if (rx->addresses[i] == address) return false;
+    }
+    void* page = map_guest_buffer(address, PIPE_RX_PAGE_SIZE, rx->count != 1);
+    if (!page) return false;
+    if (qemu_ram_addr_from_host(page) == RAM_ADDR_INVALID) {
+        cpu_physical_memory_unmap(page, PIPE_RX_PAGE_SIZE, 0, 0);
+        return false;
+    }
+    rx->addresses[rx->count] = address;
+    rx->pages[rx->count++] = page;
+    ++pipe_rx_mapped_pages;
+    return true;
+}
+
+static int pipe_rx_attach(HwPipe* pipe, bool restoring) {
+    PipeRxMapping* rx = pipe->rx;
+    if (!rx || rx->count < 2 || (rx->count - 2) % PIPE_RX_SEGMENT_PAGES) return -1;
+    if (android_pipe_rx_setup(pipe->host_pipe, rx->pages[0], rx->pages[1],
+                              pipe_rx_dirty, restoring && rx->active,
+                              rcu_register_thread, rcu_unregister_thread)) return -1;
+    rx->state_handler = qemu_add_vm_change_state_handler(pipe_rx_runstate, pipe);
+    android_pipe_rx_set_running(pipe->host_pipe, runstate_is_running());
+    for (unsigned i = 2; i < rx->count; i += PIPE_RX_SEGMENT_PAGES) {
+        if (android_pipe_rx_add_segment(pipe->host_pipe,
+                (i - 2) / PIPE_RX_SEGMENT_PAGES, &rx->pages[i])) return -1;
+    }
+    return rx->active ? android_pipe_rx_activate(pipe->host_pipe) : 0;
+}
+
+static void pipe_rx_command(HwPipe* pipe, unsigned command) {
+    PipeCommand* cb = pipe->command_buffer;
+    cb->status = GOLDFISH_PIPE_ERROR_INVAL;
+    if (command == PIPE_CMD_RX_SETUP || command == PIPE_CMD_RX_ADD_SEGMENT) {
+        unsigned count = cb->rw_params.buffers_count;
+        unsigned expected = command == PIPE_CMD_RX_SETUP ? 2 : PIPE_RX_SEGMENT_PAGES;
+        if (count != expected || count > pipe->rw_params_max_count) return;
+        if (command == PIPE_CMD_RX_SETUP) {
+            if (pipe->rx) return;
+            pipe->rx = g_new0(PipeRxMapping, 1);
+        } else if (!pipe->rx || pipe->rx->count < 2 ||
+                   (pipe->rx->count - 2) % PIPE_RX_SEGMENT_PAGES ||
+                   (unsigned)cb->rw_params.consumed_size !=
+                           (pipe->rx->count - 2) / PIPE_RX_SEGMENT_PAGES) {
+            return;
+        }
+        PipeRxMapping* rx = pipe->rx;
+        unsigned start = rx->count;
+        uint64_t* ptrs = hwpipe_get_command_rw_ptrs(pipe);
+        uint32_t* sizes = hwpipe_get_command_rw_sizes(pipe);
+        for (unsigned i = 0; i < count; ++i) {
+            if (sizes[i] != PIPE_RX_PAGE_SIZE || !pipe_rx_map_page(rx, ptrs[i])) {
+                while (rx->count > start) {
+                    unsigned j = --rx->count;
+                    cpu_physical_memory_unmap(rx->pages[j], PIPE_RX_PAGE_SIZE,
+                                              j != 1, PIPE_RX_PAGE_SIZE);
+                    --pipe_rx_mapped_pages;
+                }
+                return;
+            }
+        }
+        if (command == PIPE_CMD_RX_SETUP) {
+            if (pipe_rx_attach(pipe, false)) return;
+        } else {
+            if (android_pipe_rx_add_segment(pipe->host_pipe,
+                    (start - 2) / PIPE_RX_SEGMENT_PAGES, &rx->pages[start])) return;
+        }
+    } else {
+        if (!pipe->rx) return;
+        switch (command) {
+        case PIPE_CMD_RX_ACTIVATE:
+            if (pipe->rx->active || android_pipe_rx_activate(pipe->host_pipe)) return;
+            pipe->rx->active = true;
+            break;
+        case PIPE_CMD_RX_CREDIT:
+            if (!pipe->rx->active) return;
+            android_pipe_rx_credit(pipe->host_pipe);
+            break;
+        case PIPE_CMD_RX_ARM:
+            if (!pipe->rx->active) return;
+            android_pipe_rx_arm(pipe->host_pipe, cb->rw_params.buffers_count);
+            break;
+        default:
+            return;
+        }
+    }
+    cb->status = 0;
+}
+
+#include "goldfish_pipe_shared_tx.h"
 
 static void unmap_command_buffer(void* buffer) {
     cpu_physical_memory_unmap(buffer, COMMAND_BUFFER_SIZE, 1,
@@ -908,6 +1097,25 @@ static void pipeDevice_doCommand_v2(HwPipe* pipe) {
     }
 
     switch (command) {
+        case PIPE_CMD_ENABLE_DOORBELL:
+            pipe->command_buffer->status = pipe_doorbell_enable(pipe)
+                    ? 0 : GOLDFISH_PIPE_ERROR_INVAL;
+            break;
+        case PIPE_CMD_TX_SETUP:
+        case PIPE_CMD_TX_ADD_PAGES:
+        case PIPE_CMD_TX_FINISH_SEGMENT:
+        case PIPE_CMD_TX_ACTIVATE:
+        case PIPE_CMD_TX_KICK:
+        case PIPE_CMD_TX_ARM:
+            pipe_tx_command(pipe, command);
+            break;
+        case PIPE_CMD_RX_SETUP:
+        case PIPE_CMD_RX_ADD_SEGMENT:
+        case PIPE_CMD_RX_ACTIVATE:
+        case PIPE_CMD_RX_CREDIT:
+        case PIPE_CMD_RX_ARM:
+            pipe_rx_command(pipe, command);
+            break;
         case PIPE_CMD_CLOSE: {
             DD("%s: CMD_CLOSE id=%d", __func__, (int)pipe->id);
             // Remove from device's lists.
@@ -929,6 +1137,10 @@ static void pipeDevice_doCommand_v2(HwPipe* pipe) {
         case PIPE_CMD_READ:
         case PIPE_CMD_WRITE:
         case PIPE_CMD_CALL: {
+            if (pipe->tx && pipe->tx->active && command != PIPE_CMD_READ) {
+                pipe->command_buffer->status = GOLDFISH_PIPE_ERROR_INVAL;
+                break;
+            }
             const bool willModifyData = command != PIPE_CMD_WRITE;
             const bool isCall = command == PIPE_CMD_CALL;
             pipe->command_buffer->rw_params.consumed_size = 0;
@@ -1215,6 +1427,13 @@ static void pipe_dev_write_v2(PipeDevice* dev,
     }
 
     switch (offset) {
+        case PIPE_DOORBELL_REGISTER:
+            if (value < dev->pipes_capacity && dev->pipes[value] &&
+                !dev->pipes[value]->closed && dev->pipes[value]->tx &&
+                dev->pipes[value]->tx->active) {
+                android_pipe_tx_kick(dev->pipes[value]->host_pipe);
+            }
+            break;
         case PIPE_REG_SIGNAL_BUFFER_HIGH:
             dev->signalled_pipe_buffer_addr = value << 32;
             break;
@@ -1456,7 +1675,8 @@ static void goldfish_pipe_save_v1(QEMUFile* file, PipeDevice* dev) {
 
 static void goldfish_pipe_save_v2(QEMUFile* file, PipeDevice* dev) {
     assert(dev->device_version == PIPE_DEVICE_VERSION);
-    qemu_put_be32(file, dev->device_version);
+    // Format 3 stores shared RX/TX state and TX event registration.
+    qemu_put_be32(file, 3);
 
     /* Save the device data. */
     qemu_put_be32(file, dev->driver_version);
@@ -1485,6 +1705,15 @@ static void goldfish_pipe_save_v2(QEMUFile* file, PipeDevice* dev) {
         qemu_put_be32(file, pipe->rw_params_max_count);
         qemu_put_byte(file, pipe->closed);
         qemu_put_byte(file, pipe->wanted);
+        qemu_put_be32(file, pipe->rx ? pipe->rx->count : 0);
+        if (pipe->rx && pipe->rx->count) {
+            qemu_put_byte(file, pipe->rx->active);
+            for (unsigned j = 0; j < pipe->rx->count; ++j) {
+                qemu_put_be64(file, pipe->rx->addresses[j]);
+            }
+        }
+        qemu_put_byte(file, pipe->doorbell_enabled);
+        pipe_tx_save(pipe, file);
         // It's possible to get a 'save' command right after the 'load' one,
         // when some force-closed pipes are still on the list.
         if (pipe->host_pipe) {
@@ -1635,8 +1864,9 @@ static int goldfish_pipe_load_v2(QEMUFile* file, PipeDevice* dev) {
     uint32_t* force_closed_pipes = NULL;
 
     /* Load the device. */
-    dev->device_version = qemu_get_be32(file);
-    if (dev->device_version > PIPE_DEVICE_VERSION) {
+    uint32_t saved_version = qemu_get_be32(file);
+    dev->device_version = saved_version >= 3 ? PIPE_DEVICE_VERSION : saved_version;
+    if (saved_version > 3 || saved_version < PIPE_DEVICE_VERSION_v1) {
         goto done;
     } else if (dev->device_version == PIPE_DEVICE_VERSION_v1) {
         // redirect to the v1 loader if this is an old pipe.
@@ -1703,7 +1933,30 @@ static int goldfish_pipe_load_v2(QEMUFile* file, PipeDevice* dev) {
         pipe->rw_params_max_count = qemu_get_be32(file);
         pipe->closed = qemu_get_byte(file);
         pipe->wanted = qemu_get_byte(file);
+        if (saved_version >= 3) {
+            unsigned count = qemu_get_be32(file);
+            if (count) {
+                pipe->rx = g_new0(PipeRxMapping, 1);
+                pipe->rx->active = qemu_get_byte(file) != 0;
+                bool valid = count >= 2 && count <= PIPE_RX_MAX_PAGES &&
+                             (count - 2) % PIPE_RX_SEGMENT_PAGES == 0;
+                for (unsigned j = 0; valid && j < count; ++j) {
+                    valid = pipe_rx_map_page(pipe->rx, qemu_get_be64(file));
+                }
+                if (!valid) {
+                    unmap_command_buffer(pipe->command_buffer);
+                    hwpipe_free(pipe, GOLDFISH_PIPE_CLOSE_ERROR);
+                    goto done;
+                }
+            }
+        }
 
+        bool doorbell_enabled = saved_version >= 3 && qemu_get_byte(file);
+        if (saved_version >= 3 && !pipe_tx_load(pipe, file)) {
+            unmap_command_buffer(pipe->command_buffer);
+            hwpipe_free(pipe, GOLDFISH_PIPE_CLOSE_ERROR);
+            goto done;
+        }
         char force_close = 0;
         char has_host_pipe = qemu_get_byte(file);
         if (has_host_pipe) {
@@ -1731,6 +1984,14 @@ static int goldfish_pipe_load_v2(QEMUFile* file, PipeDevice* dev) {
             goto done;
         }
         dev->pipes[pipe->id] = pipe;
+        if (pipe->rx && !pipe->closed && pipe_rx_attach(pipe, true)) {
+            goto done;
+        }
+        if (doorbell_enabled && !pipe->closed) {
+            pipe_doorbell_enable(pipe);
+        }
+        if (pipe->tx && !pipe->closed && pipe->tx->control_count == 2 &&
+            pipe_tx_attach(pipe, true)) goto done;
     }
 
     /* Reconstruct wanted pipes list. */

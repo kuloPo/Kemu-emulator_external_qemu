@@ -71,6 +71,8 @@ android_add_test(
   TARGET android-emu-hardware_unittests
   SOURCE_DIR test
   SRC android/emulation/android_pipe_pingpong_unittest.cpp
+      android/emulation/SharedReceiveQueue_unittest.cpp
+      android/emulation/SharedTransmitQueue_unittest.cpp
       android/emulation/android_pipe_zero_unittest.cpp
       android/emulation/AndroidAsyncMessagePipe_unittest.cpp
       android/emulation/DeviceContextRunner_unittest.cpp

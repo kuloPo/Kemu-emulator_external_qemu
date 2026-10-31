@@ -192,6 +192,38 @@ static HMODULE hWinHvPlatform, hWinHvEmulation;
 static WHV_PROCESSOR_XSAVE_FEATURES whpx_xsave_cap;
 
 struct whpx_state whpx_global;
+
+struct WhpxDoorbell {
+    WHV_DOORBELL_MATCH_DATA match;
+};
+
+WhpxDoorbell* whpx_doorbell_create(uint64_t gpa, uint32_t value, void* event)
+{
+    if (!whpx_enabled() || !whp_dispatch.WHvRegisterPartitionDoorbellEvent ||
+        !whp_dispatch.WHvUnregisterPartitionDoorbellEvent) return NULL;
+    WhpxDoorbell* doorbell = g_new0(WhpxDoorbell, 1);
+    doorbell->match.GuestAddress = gpa;
+    doorbell->match.Length = 4;
+    doorbell->match.MatchOnLength = 1;
+    doorbell->match.Value = value;
+    doorbell->match.MatchOnValue = 1;
+    HRESULT hr = whp_dispatch.WHvRegisterPartitionDoorbellEvent(
+            whpx_global.partition, &doorbell->match, (HANDLE)event);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to register pipe doorbell, hr=%08lx", hr);
+        g_free(doorbell);
+        return NULL;
+    }
+    return doorbell;
+}
+
+void whpx_doorbell_destroy(WhpxDoorbell* doorbell)
+{
+    if (!doorbell) return;
+    assert(qemu_mutex_iothread_locked());
+    whp_dispatch.WHvUnregisterPartitionDoorbellEvent(whpx_global.partition, &doorbell->match);
+    g_free(doorbell);
+}
 struct WHPDispatch whp_dispatch;
 
 static bool whpx_has_xsave(void)
