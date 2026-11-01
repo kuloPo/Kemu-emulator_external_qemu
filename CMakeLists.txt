@@ -910,6 +910,34 @@ android_target_link_libraries(libqemu2-util windows
                               PRIVATE psapi::psapi winmm::winmm dxguid::dxguid)
 target_compile_definitions(libqemu2-util PRIVATE "-DPOISON_CONFIG_ANDROID")
 
+if(WINDOWS_MSVC_X86_64)
+  android_add_library(TARGET kemu-affinity LICENSE "GPL-2.0-only"
+                      SRC util/vcpu-affinity-policy.cpp util/vcpu-affinity-win32.cpp)
+  target_include_directories(kemu-affinity PUBLIC include)
+  target_link_libraries(kemu-affinity PRIVATE android-emu-base-logging)
+  target_link_libraries(libqemu2-util PRIVATE kemu-affinity)
+  android_add_test(TARGET kemu-vcpu-affinity-tests
+                   SRC tests/test-vcpu-affinity.cpp
+                   DEPS kemu-affinity gmock)
+  get_test_property(kemu-vcpu-affinity-tests ENVIRONMENT affinity_test_environment)
+  foreach(scenario IN ITEMS 8 16 18 restrict thread-override defaults pinned system invalid)
+    add_test(NAME kemu-affinity-native-${scenario}
+      COMMAND kemu-vcpu-affinity-tests --native ${scenario}
+        --gtest_output=xml:${OPTION_TEST_LOGS}/kemu-affinity-native-${scenario}.xml)
+    set_tests_properties(kemu-affinity-native-${scenario} PROPERTIES
+      ENVIRONMENT "${affinity_test_environment}"
+      WORKING_DIRECTORY $<TARGET_FILE_DIR:kemu-vcpu-affinity-tests> TIMEOUT 60)
+  endforeach()
+  foreach(scenario IN ITEMS MissingCache MissingCore MissingApi MultiGroup SetFailure ReadbackFailure ChildInheritance ExternalRestriction JobRestriction)
+    add_test(NAME kemu-affinity-${scenario}
+      COMMAND kemu-vcpu-affinity-tests --gtest_filter=WindowsAffinity.${scenario}
+        --gtest_output=xml:${OPTION_TEST_LOGS}/kemu-affinity-${scenario}.xml)
+    set_tests_properties(kemu-affinity-${scenario} PROPERTIES
+      ENVIRONMENT "${affinity_test_environment}"
+      WORKING_DIRECTORY $<TARGET_FILE_DIR:kemu-vcpu-affinity-tests> TIMEOUT 60)
+  endforeach()
+endif()
+
 # Once we have a newer version of cmake we can generate the object library in a
 # platform independent way b/121393952
 android_add_library(

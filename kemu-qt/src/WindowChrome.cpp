@@ -64,6 +64,7 @@ private:
 
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
+void startAffinityGuiChecks(EmulatorContainer*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startSensorRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 #endif
@@ -408,6 +409,7 @@ void WindowChrome::pollBoot() {
     if (qEnvironmentVariableIsSet("KEMU_ROTATION_TEST_RESULTS")) startRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_SENSOR_ROTATION_TEST_RESULTS")) startSensorRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_RESULTS")) startLiveGuiChecks(mContainer, mDisplay);
+    if (qEnvironmentVariableIsSet("KEMU_AFFINITY_TEST_REQUEST")) startAffinityGuiChecks(mContainer);
 #endif
 }
 

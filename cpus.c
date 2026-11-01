@@ -46,6 +46,7 @@
 
 #include "qemu/thread.h"
 #include "qemu/thread_local.h"
+#include "qemu/vcpu-affinity.h"
 #include "sysemu/cpus.h"
 #include "sysemu/qtest.h"
 #include "qemu/main-loop.h"
@@ -2111,6 +2112,11 @@ void qemu_init_vcpu(CPUState *cpu)
     while (!cpu->created) {
         qemu_cond_wait(&qemu_cpu_cond, &qemu_global_mutex);
     }
+#ifdef _WIN32
+    if (!tcg_enabled() || qemu_tcg_mttcg_enabled()) {
+        kemu_vcpu_affinity_apply(cpu->cpu_index, cpu->thread->tid);
+    }
+#endif
 }
 
 void cpu_stop_current(void)

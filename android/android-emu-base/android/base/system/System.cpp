@@ -37,6 +37,7 @@
 #include "aemu/base/files/ScopedFileHandle.h"
 #include "aemu/base/system/Win32UnicodeString.h"
 #include "aemu/base/system/Win32Utils.h"
+#include "android/base/system/Win32ChildProcess.h"
 #endif
 
 #ifdef _WIN32
@@ -2049,7 +2050,7 @@ public:
             argsUnicode = Win32UnicodeString(args);
         }
 
-        if (!::CreateProcessW(commandUnicode.c_str(), // program path
+        if (!childprocess::create(commandUnicode.c_str(), // program path
                     argsUnicode.data(), // command line args, has to be writable
                     nullptr,            // process handle is not inheritable
                     nullptr,            // thread handle is not inheritable

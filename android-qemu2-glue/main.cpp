@@ -13,6 +13,7 @@
 #include "aemu/base/StringFormat.h"
 #include "aemu/base/Uuid.h"
 #include "aemu/base/async/ThreadLooper.h"
+#include "qemu/vcpu-affinity.h"
 #include "aemu/base/files/PathUtils.h"
 #include "aemu/base/memory/ScopedPtr.h"
 #include "aemu/base/system/Win32Utils.h"
@@ -1472,8 +1473,6 @@ extern "C" int main(int argc, char** argv) {
 #endif
     process_early_setup(argc, argv);
     android_report_session_phase(ANDROID_SESSION_PHASE_PARSEOPTIONS);
-    // Start GPU information query to use it later for the renderer seleciton.
-    async_query_host_gpu_start();
 
     const char* executable = argv[0];
     // QtWebEngine requires the executable name in argv, so let's save it here,
@@ -1599,6 +1598,7 @@ extern "C" int main(int argc, char** argv) {
                 }
 
                 initialize_virtio_input_devs(args, hw);
+                async_query_host_gpu_start();
                 return startEmulatorWithMinConfig(
                         args.size(), args.array(), "custom", 25,
 #ifdef __aarch64__
@@ -1628,6 +1628,23 @@ extern "C" int main(int argc, char** argv) {
         // Normal exit.
         return exitStatus;
     }
+
+    // Resolve the CPU count before GPU queries, rendering and UI startup.
+#if defined(TARGET_X86_64) || defined(TARGET_I386)
+    if (hw->hw_cpu_ncore > 1 &&
+        !androidCpuAcceleration_hasModernX86VirtualizationFeatures()) {
+        dwarning("Modern X86 virtualization features unavailable; using 1 vCPU.");
+        hw->hw_cpu_ncore = 1;
+    }
+#ifdef __APPLE__
+    if (System::get()->getCpuCoreCount() < 6) {
+        dwarning("Fewer than 6 logical cores; using 1 vCPU.");
+        hw->hw_cpu_ncore = 1;
+    }
+#endif
+#endif
+    kemu_process_affinity_init(std::max(1, hw->hw_cpu_ncore));
+    async_query_host_gpu_start();
 
     // just because we know that we're in the new emulator as we got here
     opts->ranchu = 1;
@@ -2356,30 +2373,6 @@ extern "C" int main(int argc, char** argv) {
 #else
     args.add2("-machine", "type=ranchu");
 #endif
-#endif  // !TARGET_X86_64 && !TARGET_I386
-
-#if defined(TARGET_X86_64) || defined(TARGET_I386)
-    // SMP Support.
-    if (hw->hw_cpu_ncore > 1 &&
-        !androidCpuAcceleration_hasModernX86VirtualizationFeatures()) {
-        dwarning(
-                "Not all modern X86 virtualization features supported, which "
-                "introduces problems with slowdown when running Android on "
-                "multicore vCPUs. Setting AVD to run with 1 vCPU core only.");
-        hw->hw_cpu_ncore = 1;
-    }
-
-#ifdef __APPLE__
-    // macOS emulator is super slow on machines with less
-    // than 6 logical cores.
-    if (System::get()->getCpuCoreCount() < 6) {
-        dwarning(
-                "Running on a system with less than 6 logical cores. "
-                "Setting number of virtual cores to 1");
-        hw->hw_cpu_ncore = 1;
-    }
-#endif
-
 #endif  // !TARGET_X86_64 && !TARGET_I386
 
     if (hw->hw_cpu_ncore > 1) {

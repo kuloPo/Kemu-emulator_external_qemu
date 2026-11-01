@@ -44,12 +44,36 @@ int main(int argc,char** argv) {
         WSADATA network{}; require(WSAStartup(MAKEWORD(2,2),&network)==0,"Cannot initialize test networking");
         const auto args=app.arguments();
         const fs::path self(app.applicationFilePath().toStdWString());
+        if (args.value(1)=="--affinity-report") {
+            DWORD_PTR mask=0,system=0;
+            require(GetProcessAffinityMask(GetCurrentProcess(),&mask,&system),"Cannot read child affinity");
+            std::cout << std::hex << mask;
+            return 0;
+        }
+        if (args.value(1)=="--qt-affinity") {
+            DWORD_PTR baseline=0,system=0;
+            require(GetProcessAffinityMask(GetCurrentProcess(),&baseline,&system),"Cannot read baseline affinity");
+            const auto pool=baseline & (~baseline+1);
+            require(SetProcessAffinityMask(GetCurrentProcess(),pool),"Cannot constrain test parent");
+            android::base::childprocess::setAffinity(baseline,pool);
+            QProcess child;
+            kemu::configureChildProcess(child);
+            child.start(app.applicationFilePath(),{"--affinity-report"});
+            require(child.waitForFinished(10000) && child.exitCode()==0,"Qt child did not resume successfully");
+            require(child.readAllStandardOutput().trimmed().toULongLong(nullptr,16)==baseline,"Qt child inherited the engine pool");
+            require(SetProcessAffinityMask(GetCurrentProcess(),baseline),"Cannot restore test parent");
+            std::cout << "PASS: Qt child starts with baseline affinity before executing\n";
+            return 0;
+        }
         if (self.filename()==L"qemu-system-x86_64.exe") {
             const auto root=self.parent_path().parent_path().parent_path();
             Socket console,adb; console.listenOn(5554); adb.listenOn(5555);
             const auto mutex=QString::fromStdString(read(root/"lease-name")).toStdWString();
             Handle inherited{OpenMutexW(SYNCHRONIZE,FALSE,mutex.c_str())};
             require(!inherited.value,"Restart retained the old emulator instance lease");
+            DWORD_PTR mask=0,system=0;
+            require(GetProcessAffinityMask(GetCurrentProcess(),&mask,&system),"Cannot read restarted affinity");
+            require(mask==std::stoull(read(root/"baseline-affinity")),"Restart inherited the old engine pool");
             require(args.value(args.indexOf("-cores")+1)=="1" && args.value(args.indexOf("-memory")+1)=="4096","Restart did not apply saved CPU/RAM settings");
             const fs::path avd(qEnvironmentVariable("ANDROID_AVD_HOME").toStdWString());
             const auto config=read(avd/"kemu.avd/config.ini");
@@ -63,6 +87,12 @@ int main(int argc,char** argv) {
             SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
             Handle lease{CreateMutexW(&security,FALSE,mutex.c_str())}; require(lease.value,"Cannot create test instance lease");
             write(root/"lease-name",QString::fromStdWString(mutex).toStdString());
+            DWORD_PTR baseline=0,system=0;
+            require(GetProcessAffinityMask(GetCurrentProcess(),&baseline,&system),"Cannot read test baseline");
+            write(root/"baseline-affinity",std::to_string(baseline));
+            const auto pool=baseline & (~baseline+1);
+            require(SetProcessAffinityMask(GetCurrentProcess(),pool),"Cannot narrow old engine affinity");
+            android::base::childprocess::setAffinity(baseline,pool);
             qint64 pid=0;
             require(kemu::startDetachedProcess(QString::fromStdWString((root/"Kemu.exe").wstring()),{"--restart-pid",QString::number(GetCurrentProcessId())},args.at(2),&pid),"Cannot launch actual restart helper");
             write(root/"launcher-pid",std::to_string(pid));

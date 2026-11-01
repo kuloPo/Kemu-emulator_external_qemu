@@ -471,7 +471,10 @@ void UpdateController::offerInstall() {
 }
 QByteArray UpdateController::adbCommand(const QString& adb, const QString& serial, const QStringList& args, int timeout, bool cancellable) {
     require(!adb.isEmpty() && serial.startsWith("emulator-"), "ADB for this emulator is unavailable");
-    QProcess process; process.setProcessChannelMode(QProcess::MergedChannels); process.start(adb, QStringList{"-s", serial} + args);
+    QProcess process;
+    configureChildProcess(process);
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start(adb, QStringList{"-s", serial} + args);
     require(process.waitForStarted(10000), "Cannot start ADB"); QElapsedTimer timer; timer.start(); QByteArray output;
     while (!process.waitForFinished(100)) {
         output += process.readAll(); if (output.size() > 4*1024*1024) output = output.right(4*1024*1024);

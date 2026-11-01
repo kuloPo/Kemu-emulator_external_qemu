@@ -49,6 +49,7 @@ target_include_directories(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
 option(KEMU_GUI_TESTS "Include opt-in live VM UI checks" OFF)
 if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
     target_sources(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/LiveGuiChecks.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/tests/AffinityGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/RotationGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/SensorRotationGuiChecks.cpp)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
