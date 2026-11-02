@@ -50,6 +50,7 @@
 #include "render-utils/dma_device.h"
 #include "render-utils/logging_operations.h"
 #include "render-utils/render_api_functions.h"
+#include "render-utils/render_api_version.h"
 #include "aemu/base/Log.h"
 #include "android/emulation/control/ScreenCapturer.h"
 #include "absl/strings/str_cat.h"
@@ -107,6 +108,19 @@ LIST_RENDER_API_FUNCTIONS(FUNCTION_)
 static int initOpenglesEmulationFuncs(ADynamicLibrary* rendererLib) {
     void* symbol;
     char* error;
+
+    symbol = adynamicLibrary_findSymbol(rendererLib, "getRendererInterfaceVersion", &error);
+    if (!symbol) {
+        derror("GLES emulation: Renderer interface version is unavailable: %s", error);
+        free(error);
+        return -1;
+    }
+    const auto version = reinterpret_cast<gfxstream::GetRendererInterfaceVersion>(symbol)();
+    if (version != gfxstream::kRendererInterfaceVersion) {
+        derror("GLES emulation: Renderer interface version mismatch (expected %u, got %u)",
+               gfxstream::kRendererInterfaceVersion, version);
+        return -1;
+    }
 
 #define FUNCTION_(ret, name, sig, params)                                   \
     symbol = adynamicLibrary_findSymbol(rendererLib, #name, &error);        \

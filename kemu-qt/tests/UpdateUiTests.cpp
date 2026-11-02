@@ -253,12 +253,52 @@ int main(int argc, char** argv) {
         using namespace std::chrono;
         const kemu::FrameRateCounter::Clock::time_point start{};
         kemu::FrameRateCounter counter(start);
-        for (int frame = 0; frame < 30; ++frame) counter.recordFrame();
+        const auto frameTime = [&](int frame, int rate) {
+            return start + nanoseconds(int64_t(frame) * 1000000000 / rate);
+        };
+        const auto expectRate = [](double actual, double expected) {
+            require(qAbs(actual - expected) < 0.0001, "Measured FPS differs from frame cadence");
+        };
+        for (int frame = 1; frame <= 30; ++frame) counter.recordFrame(frameTime(frame, 60));
         require(counter.sample(start) == 0.0, "Zero elapsed time must not consume frames");
-        require(counter.sample(start + milliseconds(500)) == 60.0, "Frame rate must use elapsed seconds");
+        expectRate(counter.sample(start + milliseconds(500)), 60.0);
         require(counter.sample(start + seconds(1)) == 0.0, "Idle frame rate must return to zero");
-        for (int frame = 0; frame < 90; ++frame) counter.recordFrame();
-        require(counter.sample(start + milliseconds(2500)) == 60.0, "Delayed UI timers must use actual elapsed time");
+        for (int frame = 1; frame <= 90; ++frame) counter.recordFrame(seconds(1) + frameTime(frame, 60));
+        expectRate(counter.sample(start + milliseconds(2510)), 60.0);
+
+        for (int rate : {15, 30, 60, 120, 144}) {
+            for (int limit : {0, rate, rate * 2}) {
+                kemu::FrameRateCounter steady(start, limit);
+                int nextFrame = 1;
+                for (int pollMs : {990, 2010, 2990, 4010, 7010}) {
+                    const auto poll = start + milliseconds(pollMs);
+                    while (frameTime(nextFrame, rate) <= poll) {
+                        steady.recordFrame(frameTime(nextFrame++, rate));
+                    }
+                    expectRate(steady.sample(poll), rate);
+                }
+                require(steady.sample(start + seconds(9)) == 0.0, "An idle stream must report zero FPS");
+            }
+        }
+
+        kemu::FrameRateCounter stalled(start, 60);
+        for (int frame = 1; frame <= 60; ++frame) stalled.recordFrame(frameTime(frame, 60));
+        const auto stalledRate = stalled.sample(start + milliseconds(1500));
+        require(stalledRate > 39.0 && stalledRate < 41.0, "A stall within the sample must reduce FPS");
+        require(stalled.sample(start + milliseconds(2500)) == 0.0, "A stopped stream must report zero FPS");
+        for (int frame = 1; frame <= 60; ++frame) stalled.recordFrame(milliseconds(2500) + frameTime(frame, 60));
+        expectRate(stalled.sample(start + milliseconds(3510)), 60.0);
+
+        kemu::FrameRateCounter limited(start, 60);
+        for (int frame = 1; frame <= 120; ++frame) limited.recordFrame(frameTime(frame, 120));
+        expectRate(limited.sample(start + seconds(1)), 60.0);
+        kemu::FrameRateCounter single(start);
+        single.recordFrame(start + milliseconds(500));
+        expectRate(single.sample(start + seconds(1)), 1.0);
+        require(single.sample(start + seconds(2)) == 0.0, "A single frame must not keep FPS alive");
+        kemu::FrameRateCounter burst(start, 60);
+        for (int frame = 0; frame < 120; ++frame) burst.recordFrame(start);
+        expectRate(burst.sample(start + seconds(1)), 60.0);
     }
     for (const auto screen : {QSize(1920,1040),QSize(1280,720),QSize(960,540)}) {
         for (const auto display : {QSize(1920,1080),QSize(1080,1920),QSize(1200,2560)}) {

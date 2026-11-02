@@ -47,8 +47,9 @@ static void initKemuResources() { Q_INIT_RESOURCE(kemu); }
 namespace kemu {
 class FrameRateMonitor final {
 public:
-    explicit FrameRateMonitor(gfxstream::RendererPtr renderer)
-        : mRenderer(std::move(renderer)), mListener([this](gfxstream::FrameBufferChangeEvent event) {
+    FrameRateMonitor(gfxstream::RendererPtr renderer, int maxFrameRate)
+        : mRenderer(std::move(renderer)), mCounter(FrameRateCounter::Clock::now(), maxFrameRate),
+          mListener([this](gfxstream::FrameBufferChangeEvent event) {
             if (event.change == gfxstream::FrameBufferChange::FrameReady) mCounter.recordFrame();
         }) {
         mRenderer->addListener(&mListener);
@@ -368,7 +369,8 @@ void WindowChrome::updateFrameRate() {
     if (mFrameRatePoll.isActive() && mReady && !mClosing) {
         if (!mFrameRateMonitor) {
             const auto& renderer = android_getOpenglesRenderer();
-            if (renderer) mFrameRateMonitor = std::make_unique<FrameRateMonitor>(renderer);
+            if (renderer) mFrameRateMonitor = std::make_unique<FrameRateMonitor>(
+                renderer, getConsoleAgents()->settings->hw()->hw_lcd_vsync);
         } else {
             mFrameRate->setText(QString("FPS: %1").arg(qRound(mFrameRateMonitor->sample())));
         }
