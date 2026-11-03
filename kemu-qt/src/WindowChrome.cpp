@@ -247,7 +247,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     setShowFrameRate(QSettings(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu")
         .value("general/showFrameRate", false).toBool());
     mResize.setSingleShot(true);
-    mResize.setInterval(0);
+    mResize.setInterval(16);
     connect(&mResize, &QTimer::timeout, this, [this] {
         if (!mHaveSurface || mClosing || mContainer->isMinimized()) return;
         const QSize available = mContainer->viewport()->size();

@@ -737,4 +737,5 @@ struct SkinSurface {
     int isRound;
     EmulatorQtWindow::Ptr window;
     SkinSurfaceBitmap* bitmap;
+    bool windowCreated = false;
 };

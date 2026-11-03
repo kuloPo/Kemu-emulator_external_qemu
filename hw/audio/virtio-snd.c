@@ -25,6 +25,7 @@
 #include "hw/virtio/virtio-snd.h"
 #include "hw/pci/pci.h"
 #include "intel-hda-defs.h"
+#include "virtio-snd-timer.h"
 
 #define VIRTIO_SND_SNAPSHOT_VERSION 1
 
@@ -1597,13 +1598,21 @@ static void virtio_snd_stream_output_irq(void *opaque) {
 
     qemu_mutex_lock(&stream->mtx);
     if (stream->state == VIRTIO_PCM_STREAM_STATE_RUNNING) {
-        if (virtio_snd_stream_gpcm_to_hpcm_locked(stream)) {
-            stream->next_vq_irq_us += stream->period_us;
+        const uint32_t budget = virtio_snd_periods_due(
+            stream->next_vq_irq_us, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL_RT),
+            stream->period_us, stream->n_periods);
+        uint32_t completed = 0;
+        while (completed < budget &&
+               virtio_snd_stream_gpcm_to_hpcm_locked(stream)) {
+            ++completed;
+        }
+        if (completed) {
             virtio_notify(&stream->snd->parent, stream->snd->tx_vq);
-        } else {
-            stream->next_vq_irq_us += (stream->period_us / 4);
         }
 
+        stream->next_vq_irq_us = virtio_snd_next_batch_irq_us(
+            stream->next_vq_irq_us,
+            qemu_clock_get_us(QEMU_CLOCK_VIRTUAL_RT), stream->period_us, completed);
         timer_mod(&stream->vq_irq_timer, stream->next_vq_irq_us);
     }
     qemu_mutex_unlock(&stream->mtx);
@@ -1764,14 +1773,25 @@ static void virtio_snd_stream_input_irq(void* opaque) {
 
     qemu_mutex_lock(&stream->mtx);
     if (stream->state == VIRTIO_PCM_STREAM_STATE_RUNNING) {
-        if (virtio_snd_stream_hpcm_to_gpcm_locked(stream)) {
-            stream->next_vq_irq_us += stream->period_us;
+        const int64_t now = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL_RT);
+        stream->next_vq_irq_us = virtio_snd_capture_deadline_us(
+            stream->next_vq_irq_us, now, stream->period_us, stream->n_periods);
+        const uint32_t budget = virtio_snd_periods_due(
+            stream->next_vq_irq_us, now, stream->period_us, stream->n_periods);
+        uint32_t completed = 0;
+        while (completed < budget &&
+               virtio_snd_stream_hpcm_to_gpcm_locked(stream)) {
+            ++completed;
+        }
+        if (completed) {
             virtio_notify(&stream->snd->parent, stream->snd->rx_vq);
-        } else {
-            stream->next_vq_irq_us += (stream->period_us / 4);
         }
 
-        timer_mod(&stream->vq_irq_timer, stream->next_vq_irq_us);
+        /* Preserve unserved elapsed periods across capped batches. */
+        stream->next_vq_irq_us += (int64_t)completed * stream->period_us;
+        timer_mod(&stream->vq_irq_timer, virtio_snd_capture_timer_us(
+            stream->next_vq_irq_us, qemu_clock_get_us(QEMU_CLOCK_VIRTUAL_RT),
+            stream->period_us));
     }
     qemu_mutex_unlock(&stream->mtx);
 }

@@ -146,6 +146,7 @@ android_add_test(
   TARGET libqemu2-glue_unittests
   SRC base/files/KernelCmdLineLoader_unittest.cpp
       tests/VirtioGpuTimelines_unittest.cpp
+      tests/VirtioSndTimer_unittest.cpp
       utils/register_crash_info_unittest.cpp
       netsim/NfcPacketProtocol_unittest.cpp)
 

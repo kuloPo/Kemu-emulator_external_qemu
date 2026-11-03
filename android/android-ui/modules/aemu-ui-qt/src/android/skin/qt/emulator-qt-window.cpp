@@ -2311,6 +2311,15 @@ void EmulatorQtWindow::queueSkinEvent(SkinEvent event) {
     bool replaced = false;
 
     switch (eventType) {
+        case kEventSetScale:
+            // Keep input and rotation ordering while collapsing consecutive
+            // resize requests that have not reached the VM thread yet.
+            if (!mSkinEventQueue.empty() &&
+                mSkinEventQueue.back().type == kEventSetScale) {
+                mSkinEventQueue.back() = std::move(event);
+                replaced = true;
+            }
+            break;
         case kEventScrollBarChanged:
         case kEventZoomedWindowResized:
         case kEventScreenChanged: {

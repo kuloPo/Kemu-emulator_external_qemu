@@ -167,9 +167,17 @@ static void impl_skin_surface_create_window(SkinSurface* surface,
     if (window == NULL)
         return;
     QRect rect(x, y, w, h);
+    if (surface->windowCreated) {
+        // Resizing must not block the VM's I/O thread on the native sizing
+        // loop. Show, renderer updates and surface release are queued to the
+        // same UI thread in order, so the surface stays alive until they run.
+        window->showWindow(surface, rect, nullptr);
+        return;
+    }
     QSemaphore semaphore;
     window->showWindow(surface, rect, &semaphore);
     semaphore.acquire();
+    surface->windowCreated = true;
     D("ID of backing bitmap surface is %d", surface->id);
 }
 
