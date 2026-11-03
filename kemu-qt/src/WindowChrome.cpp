@@ -67,6 +67,7 @@ private:
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startAffinityGuiChecks(EmulatorContainer*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
+void startResizeGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startSensorRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 #endif
 bool enabled() {
@@ -294,6 +295,11 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     const HWND handle = reinterpret_cast<HWND>(container->winId());
     SetWindowLongPtrW(handle, GWL_STYLE, GetWindowLongPtrW(handle, GWL_STYLE) |
                       WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
+    connect(container->windowHandle(), &QWindow::screenChanged, this, [this](QScreen* screen) {
+        const QSize display = mDisplay->backingSurfaceSize();
+        if (screen && !display.isEmpty())
+            mContainer->setMinimumSize(windowSizing(display, screen->availableGeometry().size()).minimum);
+    });
     const DWMNCRENDERINGPOLICY noFrame = DWMNCRP_DISABLED;
     DwmSetWindowAttribute(handle, DWMWA_NCRENDERING_POLICY, &noFrame, sizeof(noFrame));
     const QString instance = qEnvironmentVariable("KEMU_INSTANCE");
@@ -345,7 +351,7 @@ void WindowChrome::surfaceChanged() {
             if (!normal.isEmpty()) mNormalSizes[mSurfacePortrait] = normal.size();
         }
         mSurfacePortrait = portrait;
-        const auto sizing = windowSizing(mDisplay->size(), mContainer->screen()->availableGeometry().size());
+        const auto sizing = windowSizing(mDisplay->backingSurfaceSize(), mContainer->screen()->availableGeometry().size());
         mContainer->setMinimumSize(sizing.minimum);
         mPendingWindowSize = mNormalSizes[portrait].isEmpty() ? sizing.initial : mNormalSizes[portrait];
         applyPendingWindowSize();
@@ -409,6 +415,7 @@ void WindowChrome::pollBoot() {
     });
 #ifdef KEMU_GUI_TESTS
     if (qEnvironmentVariableIsSet("KEMU_ROTATION_TEST_RESULTS")) startRotationGuiChecks(mContainer, mDisplay);
+    if (qEnvironmentVariableIsSet("KEMU_RESIZE_TEST_RESULTS")) startResizeGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_SENSOR_ROTATION_TEST_RESULTS")) startSensorRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_RESULTS")) startLiveGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_AFFINITY_TEST_REQUEST")) startAffinityGuiChecks(mContainer);
@@ -475,7 +482,11 @@ void WindowChrome::applyPendingWindowSize() {
         mContainer->isMinimized() || mContainer->isFullScreen()) return;
     const QRect available = mContainer->screen()->availableGeometry();
     const QPoint center = mPendingWindowCenter;
-    const QSize size = mPendingWindowSize.boundedTo(available.size()).expandedTo(mContainer->minimumSize());
+    const QSize display = mDisplay->backingSurfaceSize();
+    if (display.isEmpty()) return;
+    mContainer->setMinimumSize(windowSizing(display, available.size()).minimum);
+    const QSize size = fitWindowSize(mPendingWindowSize, display,
+        mContainer->size() - mContainer->viewport()->size(), mContainer->minimumSize(), available.size());
     mPendingWindowSize = {};
     mContainer->resize(size);
     const QPoint origin = center - mContainer->rect().center();
@@ -535,6 +546,52 @@ bool WindowChrome::nativeEvent(void* message, qintptr* result) {
     auto* msg = static_cast<MSG*>(message);
     if (msg->message == WM_NCCALCSIZE && msg->wParam) { *result = 0; return true; }
     if (msg->message == WM_NCACTIVATE) { *result = TRUE; return true; }
+    if (msg->message == WM_ENTERSIZEMOVE) {
+        RECT rect{};
+        mResizeStartSize = GetWindowRect(msg->hwnd, &rect)
+            ? QSize(rect.right - rect.left, rect.bottom - rect.top) : QSize();
+    }
+    if (msg->message == WM_EXITSIZEMOVE) mResizeStartSize = {};
+    if (msg->message == WM_SIZING && !IsZoomed(msg->hwnd) && !mContainer->isFullScreen()) {
+        Qt::Edges edges;
+        switch (msg->wParam) {
+            case WMSZ_LEFT: edges = Qt::LeftEdge; break;
+            case WMSZ_RIGHT: edges = Qt::RightEdge; break;
+            case WMSZ_TOP: edges = Qt::TopEdge; break;
+            case WMSZ_BOTTOM: edges = Qt::BottomEdge; break;
+            case WMSZ_TOPLEFT: edges = Qt::TopEdge | Qt::LeftEdge; break;
+            case WMSZ_TOPRIGHT: edges = Qt::TopEdge | Qt::RightEdge; break;
+            case WMSZ_BOTTOMLEFT: edges = Qt::BottomEdge | Qt::LeftEdge; break;
+            case WMSZ_BOTTOMRIGHT: edges = Qt::BottomEdge | Qt::RightEdge; break;
+            default: return false;
+        }
+        const QSize display = mDisplay->backingSurfaceSize();
+        if (display.isEmpty()) return false;
+        auto* rect = reinterpret_cast<RECT*>(msg->lParam);
+        if (mResizeStartSize.isEmpty()) {
+            RECT rect{};
+            if (!GetWindowRect(msg->hwnd, &rect)) return false;
+            mResizeStartSize = QSize(rect.right - rect.left, rect.bottom - rect.top);
+        }
+        QRegion workArea;
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+            MONITORINFO info{sizeof(MONITORINFO)};
+            if (GetMonitorInfoW(monitor, &info))
+                *reinterpret_cast<QRegion*>(data) += QRect(info.rcWork.left, info.rcWork.top,
+                    info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&workArea));
+        if (workArea.isEmpty()) return false;
+        const double dpr = mContainer->devicePixelRatioF();
+        const QRect constrained = constrainWindowResize(
+            QRect(rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top),
+            edges, mResizeStartSize, display, mContainer->size() - mContainer->viewport()->size(),
+            mContainer->minimumSize(), workArea, dpr, mMaximumTrackSize);
+        *rect = {constrained.x(), constrained.y(),
+                 constrained.x() + constrained.width(), constrained.y() + constrained.height()};
+        *result = TRUE;
+        return true;
+    }
     if (msg->message == WM_GETMINMAXINFO) {
         auto* info = reinterpret_cast<MINMAXINFO*>(msg->lParam);
         MONITORINFO monitor{sizeof(MONITORINFO)};
@@ -542,8 +599,9 @@ bool WindowChrome::nativeEvent(void* message, qintptr* result) {
             info->ptMaxPosition = {monitor.rcWork.left - monitor.rcMonitor.left, monitor.rcWork.top - monitor.rcMonitor.top};
             info->ptMaxSize = {monitor.rcWork.right - monitor.rcWork.left, monitor.rcWork.bottom - monitor.rcWork.top};
         }
-        info->ptMinTrackSize = {LONG(mContainer->minimumWidth() * mContainer->devicePixelRatioF()),
-                                LONG(mContainer->minimumHeight() * mContainer->devicePixelRatioF())};
+        mMaximumTrackSize = QSize(info->ptMaxTrackSize.x, info->ptMaxTrackSize.y);
+        const QSize minimum = mContainer->minimumSize() * mContainer->devicePixelRatioF();
+        info->ptMinTrackSize = {minimum.width(), minimum.height()};
         *result = 0;
         return true;
     }

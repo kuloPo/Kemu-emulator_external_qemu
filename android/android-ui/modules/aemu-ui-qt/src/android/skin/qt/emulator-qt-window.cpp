@@ -2806,6 +2806,10 @@ void EmulatorQtWindow::adbPushDone(std::string_view filePath,
     showErrorDialog(msg, tr("File Copy"));
 }
 
+QSize EmulatorQtWindow::backingSurfaceSize() const {
+    return mBackingSurface ? mBackingSurface->bitmap->size() : QSize();
+}
+
 void EmulatorQtWindow::doResize(const QSize& size, bool isKbdShortcut) {
     if (mClosed) {
         return;

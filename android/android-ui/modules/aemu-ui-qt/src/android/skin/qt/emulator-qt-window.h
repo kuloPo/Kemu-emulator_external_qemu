@@ -246,6 +246,7 @@ public:
     void showZoomIfNotUserHidden();
     QSize containerSize() const;
     QRect deviceGeometry() const;
+    QSize backingSurfaceSize() const;
 
     void doResize(const QSize& size, bool isKbdShortcut = false);
     void resizeAndChangeAspectRatio(bool isFolded);

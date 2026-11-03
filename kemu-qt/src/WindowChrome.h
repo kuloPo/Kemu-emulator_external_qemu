@@ -65,6 +65,8 @@ private:
     QSize mRequestedSize;
     QSize mNormalSizes[2];
     QSize mPendingWindowSize;
+    QSize mResizeStartSize;
+    QSize mMaximumTrackSize;
     QPoint mPendingWindowCenter;
     bool mSurfacePortrait = false;
     int mGuestRotation = -1;

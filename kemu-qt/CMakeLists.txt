@@ -51,6 +51,7 @@ if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
     target_sources(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/LiveGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/AffinityGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/RotationGuiChecks.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/tests/ResizeGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/SensorRotationGuiChecks.cpp)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
         TARGET_DIRECTORY aemu-ui-qt PROPERTIES COMPILE_DEFINITIONS KEMU_GUI_TESTS=1)
@@ -126,7 +127,7 @@ if(WINDOWS_MSVC_X86_64)
     add_executable(kemu-restart-tests tests/RestartTests.cpp)
     add_executable(kemu-rotation-tests tests/RotationTests.cpp)
     target_compile_features(kemu-rotation-tests PRIVATE cxx_std_17)
-    target_link_libraries(kemu-rotation-tests PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+    target_link_libraries(kemu-rotation-tests PRIVATE Qt${QT_VERSION_MAJOR}::Gui)
     set_target_properties(kemu-rotation-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
     target_compile_features(kemu-restart-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-restart-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
