@@ -4,6 +4,10 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>About</source>
+        <translation>关于</translation>
+    </message>
+    <message>
         <source>Major update available</source>
         <translation>有重大更新</translation>
     </message>
@@ -109,11 +113,6 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <location filename="../src/UpdateController.cpp" line="179"/>
         <source>Current version: </source>
         <translation>当前版本：</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="73"/>
-        <source>Current version: Loading...</source>
-        <translation>当前版本：读取中…</translation>
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="105"/>

@@ -13,6 +13,7 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QFileDialog>
+#include <QIcon>
 #include <QPainter>
 #include <QStyleOptionButton>
 #include <QDesktopServices>
@@ -92,7 +93,7 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     auto* page = new QWidget(pages); pages->addWidget(page);
     connect(tabs, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex); tabs->setCurrentRow(0);
     auto* column = new QVBoxLayout(page); column->setSpacing(14);
-    mVersion = new QLabel(QCoreApplication::translate("Kemu", "Current version: Loading..."), page); column->addWidget(mVersion);
+    mVersion = new QLabel(page); mVersion->setObjectName("KemuCurrentVersion"); column->addWidget(mVersion);
     mStatus = new QLabel(QCoreApplication::translate("Kemu", "Check for updates to get the latest version."), page); mStatus->setObjectName("KemuUpdateStatus"); mStatus->setWordWrap(true); mStatus->setTextFormat(Qt::PlainText); column->addWidget(mStatus);
     mAutoUpdate = new UpdateCheckBox(QCoreApplication::translate("Kemu", "Automatic updates"), page); mAutoUpdate->setObjectName("KemuAutoUpdate");
     QSettings settings(QSettings::defaultFormat(), QSettings::UserScope, "Kemu", "Kemu");
@@ -116,6 +117,24 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     connect(storageTimer,&QTimer::timeout,this,[this] { if (mDialog->isVisible()) refreshStorage(); });
     storageTimer->start();
     tabs->insertItem(1,QCoreApplication::translate("Kemu", "Performance"));
+    auto* about = new QWidget(pages); about->setObjectName("KemuAbout"); pages->addWidget(about);
+    tabs->addItem(QCoreApplication::translate("Kemu", "About"));
+    auto* aboutColumn = new QVBoxLayout(about); aboutColumn->setSpacing(16);
+    aboutColumn->addStretch();
+    auto* logo = new QLabel(about); logo->setObjectName("KemuAboutLogo");
+    logo->setPixmap(QIcon(":/kemu/kemu.ico").pixmap(QSize(96,96), mDialog->devicePixelRatioF()));
+    aboutColumn->addWidget(logo, 0, Qt::AlignHCenter);
+    auto* brand = new QLabel("Kemu", about);
+    aboutColumn->addWidget(brand, 0, Qt::AlignHCenter);
+    mAboutVersion = new QLabel(about); mAboutVersion->setObjectName("KemuAboutVersion");
+    mAboutVersion->setTextFormat(Qt::PlainText);
+    mAboutVersion->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    aboutColumn->addWidget(mAboutVersion, 0, Qt::AlignHCenter);
+    auto* github = new QLabel("<a href=\"https://github.com/kuloPo/Kemu\" style=\"color:#8ab8f5;\">GitHub: kuloPo/Kemu</a>", about);
+    github->setObjectName("KemuAboutGitHub"); github->setTextFormat(Qt::RichText);
+    github->setTextInteractionFlags(Qt::TextBrowserInteraction); github->setOpenExternalLinks(true);
+    aboutColumn->addWidget(github, 0, Qt::AlignHCenter);
+    aboutColumn->addStretch();
     connect(mDialog, &QDialog::finished, this, [this, performance] {
         if (!mClosing) performance->closed(mDialog, mWindow, qpath(mRoot), !mBusy);
     });
@@ -125,13 +144,13 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
         mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings"));
         tabs->item(0)->setText(QCoreApplication::translate("Kemu", "General"));
         tabs->item(2)->setText(QCoreApplication::translate("Kemu", "Updates"));
+        tabs->item(3)->setText(QCoreApplication::translate("Kemu", "About"));
         languageLabel->setText(QCoreApplication::translate("Kemu", "Language"));
         showFrameRate->setText(QCoreApplication::translate("Kemu", "Show frame rate"));
         mAutoUpdate->setText(QCoreApplication::translate("Kemu", "Automatic updates"));
         mCheck->setText(QCoreApplication::translate("Kemu", "Check for updates"));
         mCancelButton->setText(QCoreApplication::translate("Kemu", "Cancel"));
-        try { mVersion->setText(QCoreApplication::translate("Kemu", "Current version: ") + QString::fromStdString(readVersion(mRoot))); }
-        catch (...) { mVersion->setText(QCoreApplication::translate("Kemu", "Current version: Unknown")); }
+        refreshVersion();
     };
     retranslate();
     connect(language, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, language, retranslate](int) {
@@ -143,6 +162,7 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
         if (languageChanged) languageChanged();
     });
     applyUiFont(mDialog);
+    brand->setFont(uiFont(22, QFont::DemiBold));
     refresh();
     QTimer::singleShot(2000, this, [this] { startup(); });
 }
@@ -163,6 +183,17 @@ void UpdateController::showSettings() { mDialog->show(); mDialog->raise(); mDial
 void UpdateController::status(const QString& text) {
     if (QThread::currentThread() != thread()) { QMetaObject::invokeMethod(this, [this, text] { if (!mClosing) mStatus->setText(text); }, Qt::QueuedConnection); }
     else mStatus->setText(text);
+}
+void UpdateController::setVersion(const QString& version) {
+    const auto text = version.isEmpty()
+        ? QCoreApplication::translate("Kemu", "Current version: Unknown")
+        : QCoreApplication::translate("Kemu", "Current version: ") + version;
+    mVersion->setText(text);
+    mAboutVersion->setText(text);
+}
+bool UpdateController::refreshVersion() {
+    try { setVersion(QString::fromStdString(readVersion(mRoot))); return true; }
+    catch (...) { setVersion(QString()); return false; }
 }
 void UpdateController::refresh() {
     std::error_code error;
@@ -351,14 +382,12 @@ void UpdateController::updateFailed(const QString& error, bool quiet) {
 void UpdateController::startup() {
     if (mBusy || mDownloaded) return;
     if (fs::exists(storage::requestPath(mAvd))) { finishStorageGrowth(); return; }
-    try { mVersion->setText(QCoreApplication::translate("Kemu", "Current version: ") + QString::fromStdString(readVersion(mRoot))); }
-    catch (...) { mVersion->setText(QCoreApplication::translate("Kemu", "Current version: Unknown")); status(QString()); return; }
+    if (!refreshVersion()) { status(QString()); return; }
     if (mAutoUpdate->isChecked() || fs::exists(mRoot / ".kemu-update")) check(true);
 }
 void UpdateController::check(bool automatic) {
     if (mBusy || fs::exists(storage::requestPath(mAvd))) return;
-    try { readVersion(mRoot); } catch (...) {
-        mVersion->setText(QCoreApplication::translate("Kemu", "Current version: Unknown"));
+    if (!refreshVersion()) {
         status(QString());
         if (!automatic) {
             UiMessageBox prompt(QMessageBox::Information, QCoreApplication::translate("Kemu", "Cannot detect current version"),
@@ -383,7 +412,7 @@ void UpdateController::check(bool automatic) {
         mStage = mRoot / ".kemu-update";
         mDownloaded = loadDownloadedUpdate(mRoot, mStage, mPlan);
     }, [this, automatic] {
-        mVersion->setText(QCoreApplication::translate("Kemu", "Current version: ") + QString::fromStdString(mPlan.current));
+        setVersion(QString::fromStdString(mPlan.current));
         if (mPlan.requiresFullInstaller) {
             const auto message = QCoreApplication::translate("Kemu", "A major update is available. Please download the full installer.");
             status(message);

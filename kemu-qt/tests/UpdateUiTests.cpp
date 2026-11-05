@@ -418,7 +418,7 @@ int main(int argc, char** argv) {
             using kemu::update::require;
             checkFrameRateHitTesting();
             auto* dialog=window.findChild<QDialog*>("KemuSettings"); require(dialog && dialog->isVisible(),"Settings dialog missing");
-            require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->count()==3,"Update navigation missing");
+            require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->count()==4,"Settings navigation missing");
             require(dialog->findChild<QPushButton*>("KemuCheckUpdate")->isEnabled(),"Check update disabled");
             require(!dialog->findChild<QPushButton*>("KemuInstallUpdate") && !dialog->findChild<QPushButton*>("KemuDownloadUpdate"),"Obsolete buttons remain");
             if (ready) {
@@ -493,8 +493,32 @@ int main(int argc, char** argv) {
             require(saved.value("general/language").toString() == "en", "Language was not saved");
             require(kemu::initializeUiLanguage(saved, QLocale("zh_CN")) == "en", "Relaunch must preserve choice");
             if (argc > 2) require(dialog->grab().save(QString::fromUtf8(argv[2]) + ".english.png"), "Cannot save English UI rendering");
+            auto* aboutVersion = dialog->findChild<QLabel*>("KemuAboutVersion");
+            auto* updateVersion = dialog->findChild<QLabel*>("KemuCurrentVersion");
+            for (const auto* language : {"zh-CN", "en"}) {
+                languages->setCurrentIndex(languages->findData(language));
+                tabs->setCurrentRow(3); app.processEvents();
+                const auto aboutTab = QLatin1String(language) == "zh-CN" ? QStringLiteral("\u5173\u4e8e") : QStringLiteral("About");
+                require(tabs->item(3)->text() == aboutTab &&
+                        dialog->findChild<QStackedWidget*>()->currentWidget()->objectName() == "KemuAbout",
+                        "About must be the last settings page in both languages");
+                const auto expectedVersion = missing
+                    ? QCoreApplication::translate("Kemu", "Current version: Unknown")
+                    : QCoreApplication::translate("Kemu", "Current version: ") + "v0.1.0";
+                require(aboutVersion && updateVersion && aboutVersion->isVisible() &&
+                        aboutVersion->text() == expectedVersion && aboutVersion->text() == updateVersion->text(),
+                        "About and Updates must display the same detected version");
+                auto* logo = dialog->findChild<QLabel*>("KemuAboutLogo");
+                auto* github = dialog->findChild<QLabel*>("KemuAboutGitHub");
+                require(logo && !logo->pixmap(Qt::ReturnByValue).isNull() && github && github->openExternalLinks() &&
+                        github->text().contains("href=\"https://github.com/kuloPo/Kemu\""),
+                        "About must display the bundled logo and clickable project link");
+                if (argc > 2) require(dialog->grab().save(QString::fromUtf8(argv[2]) + ".about-" + language + ".png"),
+                        "Cannot save About UI rendering");
+            }
+            languageChanged = false;
             languages->setCurrentIndex(languages->findData("zh-CN"));
-            require(kemu::uiLanguage() == "zh-CN" && dialog->windowTitle() != "Settings", "Switch back failed");
+            require(languageChanged && kemu::uiLanguage() == "zh-CN" && dialog->windowTitle() != "Settings", "Switch back failed");
             tabs->setCurrentRow(2);
             require(dialog->findChild<QStackedWidget*>()->currentWidget()->isAncestorOf(dialog->findChild<QPushButton*>("KemuCheckUpdate")), "Update navigation failed");
             tabs->setCurrentRow(0);

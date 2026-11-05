@@ -27,6 +27,8 @@ private:
     void startup();
     void install();
     void status(const QString& text);
+    void setVersion(const QString& version);
+    bool refreshVersion();
     void refresh();
     void work(std::function<void()> task, std::function<void()> finished,
               std::function<void(const QString& error, bool network)> failed);
@@ -43,6 +45,7 @@ private:
     QDialog* mDialog;
     QLabel* mStatus;
     QLabel* mVersion;
+    QLabel* mAboutVersion;
     QPushButton* mCheck;
     QPushButton* mCancelButton;
     QProgressBar* mProgress;
