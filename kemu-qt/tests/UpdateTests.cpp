@@ -73,9 +73,9 @@ int main(int argc, char** argv) {
         fs::remove(root/".kemu-update-pending");
         prepareUpdateTask(root,cachedHistory);
         writeText(stage/"payload/a.dll","new");
-        writeText(stage/"retained.zip","completed package");
+        writeText(stage/"retained.tar.xz","completed package");
         prepareUpdateTask(root,cachedHistory);
-        check(readText(stage/"retained.zip")=="completed package", "Same target must preserve interrupted task");
+        check(readText(stage/"retained.tar.xz")=="completed package", "Same target must preserve interrupted task");
         writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
         auto cachedPlan=resolve(cachedHistory,"v0.1.0");
         saveDownloadedUpdate(stage,cachedPlan);
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         auto newerHistory=cachedHistory;
         newerHistory["releases"].push_back({{"version","v0.3.0"},{"files",{"a.dll"}}});
         prepareUpdateTask(root,newerHistory);
-        check(!fs::exists(stage/"retained.zip") && readJson(stage/"task.json").at("to")=="v0.3.0", "New latest target must clear previous task");
+        check(!fs::exists(stage/"retained.tar.xz") && readJson(stage/"task.json").at("to")=="v0.3.0", "New latest target must clear previous task");
         writeText(stage/"protected","rollback"); writeJson(root/".kemu-update-pending",{{"stage",".kemu-update"}});
         rejects([&] { prepareUpdateTask(root,cachedHistory); });
         check(readText(stage/"protected")=="rollback", "Do not clear unfinished installation");
@@ -105,8 +105,12 @@ int main(int argc, char** argv) {
         check(!loadDownloadedUpdate(root,restoredStage,restoredPlan), "Full installer must reject cached incremental updates");
         if (argc > 1) {
             fs::path fixtures=fs::u8path(argv[1]);
-            extractPack(fixtures/"good.zip",temp/"good"); check(readText(temp/"good/Windows/a.dll")=="payload", "ZIP extraction");
-            for (const auto& name : {"traversal", "bad-hash", "symlink", "case-collision", "missing-checksum"}) rejects([&] { extractPack(fixtures/(std::string(name)+".zip"),temp/name); });
+            extractPack(fixtures/"good.tar.xz",temp/"good"); check(readText(temp/"good/Windows/a.dll")=="payload", "Pack extraction");
+            extractPack(fixtures/"large.tar.xz",temp/"large"); check(fs::file_size(temp/"large/Android/vendor/lib64/big.so")==3*1024*1024 && fs::file_size(temp/"large/Windows/empty.dll")==0, "Streamed pack extraction");
+            for (const std::string name : {"traversal", "bad-hash", "symlink", "case-collision", "missing-checksum", "hardlink", "pax", "gnu", "header-checksum",
+                                           "data-after-end", "corrupt", "truncated", "trailing-garbage", "missing-end", "one-end-block"})
+                rejects([&] { extractPack(fixtures/(name+".tar.xz"),temp/name); });
+            writeText(temp/"unknown.pack","not a pack"); rejects([&] { extractPack(temp/"unknown.pack",temp/"unknown"); });
         }
         std::cout << "Update protocol, integrity, transaction and recovery checks passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

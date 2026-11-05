@@ -426,8 +426,8 @@ void UpdateController::fetch(bool automatic) {
         }
         for (const auto& [version, release] : packs) {
             status(QCoreApplication::translate("Kemu", "Downloading and verifying update %1...").arg(QString::fromStdString(version)));
-            auto archive = mStage / (version + ".zip"), extracted = mStage / version;
-            safePath(mStage, version + ".zip");
+            auto archive = mStage / (version + ".tar.xz"), extracted = mStage / version;
+            safePath(mStage, version + ".tar.xz");
             auto unpack = [&] {
                 clearUpdateDirectory(mRoot, extracted);
                 extractPack(archive, extracted);
@@ -443,9 +443,9 @@ void UpdateController::fetch(bool automatic) {
                 catch (const std::exception&) { clearUpdateDirectory(mRoot, extracted); fs::remove(archive); }
             }
             if (!cached) {
-                auto partial = mStage / (version + ".zip.part");
-                safePath(mStage, version + ".zip.part");
-                download(std::string(ReleasesUrl) + "/download/" + version + "/update-pack.zip", partial, 8ull*1024*1024*1024, [this] { return mCancel.load(); },
+                auto partial = mStage / (version + ".tar.xz.part");
+                safePath(mStage, version + ".tar.xz.part");
+                download(std::string(ReleasesUrl) + "/download/" + version + "/update-pack.tar.xz", partial, 8ull*1024*1024*1024, [this] { return mCancel.load(); },
                 [this](uint64_t done, uint64_t total) {
                     QMetaObject::invokeMethod(this, [this, done, total] {
                         if (mClosing) return;

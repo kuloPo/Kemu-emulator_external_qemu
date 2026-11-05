@@ -79,15 +79,30 @@ endif()
 
 if(WINDOWS_MSVC_X86_64)
     set(KEMU_JSON ${CMAKE_CURRENT_LIST_DIR}/../android/third_party/json/single_include)
-    set(KEMU_ZLIB ${CMAKE_CURRENT_LIST_DIR}/../../zlib)
-    add_library(kemu-update-zip STATIC
-        ${KEMU_ZLIB}/contrib/minizip/unzip.c
-        ${KEMU_ZLIB}/contrib/minizip/ioapi.c
-        ${KEMU_ZLIB}/contrib/minizip/iowin32.c)
-    target_include_directories(kemu-update-zip PUBLIC ${KEMU_ZLIB}/contrib/minizip)
-    target_link_libraries(kemu-update-zip PUBLIC zlib)
-    set_target_properties(kemu-update-zip PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
-    android_license(TARGET kemu-update-zip LIBNAME minizip URL None SPDX Zlib LICENSE None LOCAL "${KEMU_ZLIB}/LICENSE")
+    # xz decoder files copied unmodified from LZMA SDK 25.01
+    # (AOSP platform/external/lzma 1ce995691b4d4bf3a64683765c04e5b507746c24).
+    set(KEMU_LZMA ${CMAKE_CURRENT_LIST_DIR}/third_party/lzma)
+    add_library(kemu-update-xz STATIC
+        ${KEMU_LZMA}/7zCrc.c
+        ${KEMU_LZMA}/7zCrcOpt.c
+        ${KEMU_LZMA}/Alloc.c
+        ${KEMU_LZMA}/Bra.c
+        ${KEMU_LZMA}/Bra86.c
+        ${KEMU_LZMA}/BraIA64.c
+        ${KEMU_LZMA}/CpuArch.c
+        ${KEMU_LZMA}/Delta.c
+        ${KEMU_LZMA}/Lzma2Dec.c
+        ${KEMU_LZMA}/LzmaDec.c
+        ${KEMU_LZMA}/Sha256.c
+        ${KEMU_LZMA}/Sha256Opt.c
+        ${KEMU_LZMA}/Xz.c
+        ${KEMU_LZMA}/XzCrc64.c
+        ${KEMU_LZMA}/XzCrc64Opt.c
+        ${KEMU_LZMA}/XzDec.c)
+    target_include_directories(kemu-update-xz PUBLIC ${KEMU_LZMA})
+    target_compile_definitions(kemu-update-xz PUBLIC Z7_ST)
+    set_target_properties(kemu-update-xz PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+    android_license(TARGET kemu-update-xz LIBNAME lzma-sdk URL "https://7-zip.org/sdk.html" SPDX LicenseRef-Public-Domain LICENSE None LOCAL "${KEMU_LZMA}/LICENSE")
     android_license(TARGET bcrypt winhttp shell32 libcmt libcpmt libvcruntime libucrt LIBNAME None SPDX None LICENSE None LOCAL None)
     target_sources(aemu-ui-qt PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src/StorageMoveDialog.cpp
@@ -97,7 +112,7 @@ if(WINDOWS_MSVC_X86_64)
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateDownload.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateTransaction.cpp)
     target_include_directories(aemu-ui-qt PRIVATE ${KEMU_JSON})
-    target_link_libraries(aemu-ui-qt PRIVATE kemu-update-zip bcrypt winhttp)
+    target_link_libraries(aemu-ui-qt PRIVATE kemu-update-xz bcrypt winhttp)
     add_executable(KemuUpdater WIN32 update/UpdaterMain.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp resources/kemu.rc)
     target_compile_features(KemuUpdater PRIVATE cxx_std_17)
     target_compile_definitions(KemuUpdater PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -112,7 +127,7 @@ if(WINDOWS_MSVC_X86_64)
     target_compile_features(kemu-update-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(kemu-update-tests PRIVATE ${KEMU_JSON} update)
-    target_link_libraries(kemu-update-tests PRIVATE bcrypt winhttp kemu-update-zip)
+    target_link_libraries(kemu-update-tests PRIVATE bcrypt winhttp kemu-update-xz)
     set_target_properties(kemu-update-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 endif()
 
@@ -122,7 +137,7 @@ if(WINDOWS_MSVC_X86_64)
     target_compile_features(kemu-update-ui-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-ui-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(kemu-update-ui-tests PRIVATE ${KEMU_JSON})
-    target_link_libraries(kemu-update-ui-tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets bcrypt winhttp kemu-update-zip)
+    target_link_libraries(kemu-update-ui-tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets bcrypt winhttp kemu-update-xz)
     set_target_properties(kemu-update-ui-tests PROPERTIES AUTOMOC OFF AUTORCC ON AUTOUIC OFF)
     add_executable(kemu-restart-tests tests/RestartTests.cpp)
     add_executable(kemu-rotation-tests tests/RotationTests.cpp)
