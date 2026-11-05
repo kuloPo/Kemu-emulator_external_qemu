@@ -9,6 +9,7 @@
 
 namespace kemu::update {
 struct Internet { HINTERNET h = nullptr; ~Internet() { if (h) WinHttpCloseHandle(h); } };
+static void requireNetwork(bool ok, const std::string& message) { if (!ok) throw NetworkError(message); }
 void download(const std::string& initial, const fs::path& output, uint64_t limit, const std::function<bool()>& cancelled, const std::function<void(uint64_t, uint64_t)>& progress) {
     auto url = fs::u8path(initial).wstring();
     Internet session{WinHttpOpen(L"Kemu-Updater/1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
@@ -20,11 +21,11 @@ void download(const std::string& initial, const fs::path& output, uint64_t limit
         std::wstring host(parts.lpszHostName, parts.dwHostNameLength), path(parts.lpszUrlPath, parts.dwUrlPathLength);
         if (parts.dwExtraInfoLength) path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
         require(host == L"github.com" || host == L"raw.githubusercontent.com" || host == L"release-assets.githubusercontent.com" || host == L"objects.githubusercontent.com", "Unexpected release download host");
-        Internet connection{WinHttpConnect(session.h, host.c_str(), parts.nPort, 0)}; require(connection.h, "HTTPS connection failed");
+        Internet connection{WinHttpConnect(session.h, host.c_str(), parts.nPort, 0)}; requireNetwork(connection.h, "HTTPS connection failed");
         Internet request{WinHttpOpenRequest(connection.h, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)};
         require(request.h, "Cannot create HTTPS request"); DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         require(WinHttpSetOption(request.h, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy)), "Cannot set redirect policy");
-        require(WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request.h, nullptr), "HTTPS request failed; check your connection");
+        requireNetwork(WinHttpSendRequest(request.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(request.h, nullptr), "HTTPS request failed; check your connection");
         DWORD status = 0, length = sizeof(status);
         require(WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &length, WINHTTP_NO_HEADER_INDEX), "Missing HTTP status");
         if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
@@ -34,7 +35,9 @@ void download(const std::string& initial, const fs::path& output, uint64_t limit
             require(WinHttpQueryHeaders(request.h, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, location.data(), &length, WINHTTP_NO_HEADER_INDEX), "Missing redirect");
             location.resize(wcslen(location.c_str())); url = location; continue;
         }
-        require(status == 200, "Release download returned HTTP " + std::to_string(status));
+        const auto httpError = "Release download returned HTTP " + std::to_string(status);
+        requireNetwork(status != 408 && status != 429 && status < 500, httpError);
+        require(status == 200, httpError);
         wchar_t contentLength[32]{}; length = sizeof(contentLength);
         uint64_t expected = 0;
         if (WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX,
@@ -45,7 +48,7 @@ void download(const std::string& initial, const fs::path& output, uint64_t limit
         std::vector<char> buffer(1024 * 1024); uint64_t total = 0;
         for (;;) {
             require(!cancelled(), "Update cancelled"); DWORD received = 0;
-            require(WinHttpReadData(request.h, buffer.data(), DWORD(buffer.size()), &received), "Download interrupted");
+            requireNetwork(WinHttpReadData(request.h, buffer.data(), DWORD(buffer.size()), &received), "Download interrupted");
             if (!received) break; total += received; require(total <= limit, "Download exceeds allowed size");
             out.write(buffer.data(), received); require(bool(out), "Download disk write failed");
             if (progress) progress(total, expected);

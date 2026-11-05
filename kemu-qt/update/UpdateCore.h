@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include "nlohmann/json.hpp"
@@ -17,6 +18,8 @@ struct Plan {
     std::map<std::string, Release> files;
     bool requiresFullInstaller = false;
 };
+// A connection failure or a temporary server error; retrying later may succeed.
+struct NetworkError : std::runtime_error { using std::runtime_error::runtime_error; };
 void require(bool ok, const std::string& message);
 void validateVersion(const std::string& version);
 int compareVersions(const std::string& a, const std::string& b);

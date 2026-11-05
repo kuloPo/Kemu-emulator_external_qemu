@@ -29,7 +29,8 @@ private:
     void status(const QString& text);
     void refresh();
     void work(std::function<void()> task, std::function<void()> finished,
-              std::function<void(const QString&)> failed = {});
+              std::function<void(const QString& error, bool network)> failed);
+    void updateFailed(const QString& error, bool quiet);
     void refreshStorage();
     void expandStorage();
     void moveStorage();

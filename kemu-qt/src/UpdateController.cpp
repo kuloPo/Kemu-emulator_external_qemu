@@ -276,7 +276,7 @@ void UpdateController::expandStorage() {
                 }
                 mClosing = true; mWindow->close();
             } catch (const std::exception& error) { storageFailure(QString::fromUtf8(error.what())); }
-        },[this](const QString& error) { storageFailure(error); });
+        },[this](const QString& error, bool) { storageFailure(error); });
     } catch (const std::exception& error) { storageFailure(QString::fromUtf8(error.what())); }
 }
 void UpdateController::finishStorageGrowth() {
@@ -315,25 +315,38 @@ void UpdateController::finishStorageGrowth() {
             mGrowingStorage = false;
             refreshStorage();
             QTimer::singleShot(0,this,[this] { startup(); });
-        },[this](const QString& error) { storageFailure(error); });
+        },[this](const QString& error, bool) { storageFailure(error); });
     } catch (const std::exception& error) { storageFailure(QString::fromUtf8(error.what())); }
 }
 void UpdateController::work(std::function<void()> task, std::function<void()> finished,
-                            std::function<void(const QString&)> failed) {
+                            std::function<void(const QString& error, bool network)> failed) {
     if (mBusy || mClosing) return;
-    mBusy = true; mCancel = false; refresh(); auto error = std::make_shared<QString>();
-    mWorker = QThread::create([task, error] { try { task(); } catch (const std::exception& e) { *error = QString::fromUtf8(e.what()); } });
-    connect(mWorker, &QThread::finished, this, [this, error, finished, failed] {
+    mBusy = true; mCancel = false; refresh();
+    auto error = std::make_shared<QString>(); auto network = std::make_shared<bool>(false);
+    mWorker = QThread::create([task, error, network] {
+        try { task(); }
+        catch (const NetworkError& e) { *network = true; *error = QString::fromUtf8(e.what()); }
+        catch (const std::exception& e) { *error = QString::fromUtf8(e.what()); }
+    });
+    connect(mWorker, &QThread::finished, this, [this, error, network, finished, failed] {
         if (mClosing) return; mWorker->deleteLater(); mWorker = nullptr; mBusy = false;
-        if (!error->isEmpty() || mCancel) {
-            if (failed) { failed(*error); refresh(); return; }
-            mDownloaded = false; mPlan = {};
-            try { if (!mStage.empty() && fs::is_directory(mStage)) writeText(mStage / "error.txt", error->toStdString()); } catch (...) {}
-            status(mCancel ? QCoreApplication::translate("Kemu", "Download cancelled. You can check for updates again.") : QCoreApplication::translate("Kemu", "Update could not be completed. Please try again later.\n") + *error); mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); showSettings();
-        } else finished();
+        if (!error->isEmpty() || mCancel) failed(*error, *network);
+        else finished();
         refresh();
     });
     mWorker->start();
+}
+void UpdateController::updateFailed(const QString& error, bool quiet) {
+    mDownloaded = false; mPlan = {};
+    try { if (!mStage.empty() && fs::is_directory(mStage)) writeText(mStage / "error.txt", error.toStdString()); } catch (...) {}
+    if (mCancel) {
+        status(QCoreApplication::translate("Kemu", "Download cancelled. You can check for updates again."));
+    } else {
+        qWarning("Kemu update: %s", qUtf8Printable(error));
+        status(QCoreApplication::translate("Kemu", "Update could not be completed. Please try again later.\n") + error);
+        if (quiet) return;
+    }
+    mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); showSettings();
 }
 void UpdateController::startup() {
     if (mBusy || mDownloaded) return;
@@ -398,7 +411,7 @@ void UpdateController::check(bool automatic) {
             prompt.addButton(QCoreApplication::translate("Kemu", "No"), QMessageBox::NoRole);
             prompt.exec(); return prompt.clickedButton() == yes;
         }()) fetch(automatic); }
-    });
+    }, [this, automatic](const QString& error, bool network) { updateFailed(error, automatic && network); });
 }
 void UpdateController::fetch(bool automatic) {
     mProgress->setRange(0, 0); mProgress->show(); mCancelButton->setEnabled(true); mCancelButton->show();
@@ -460,7 +473,7 @@ void UpdateController::fetch(bool automatic) {
         mProgress->hide(); mCancelButton->hide();
         status(QCoreApplication::translate("Kemu", "Update downloaded. You will be prompted on next startup, or click Check for updates to install now."));
         if (!automatic) offerInstall();
-    });
+    }, [this, automatic](const QString& error, bool network) { updateFailed(error, automatic && network); });
 }
 void UpdateController::offerInstall() {
     UiMessageBox prompt(QMessageBox::Information, QCoreApplication::translate("Kemu", "Update ready"),
@@ -566,7 +579,7 @@ void UpdateController::install() {
                 else if (elapsed->elapsed() > 120000) { timer->stop(); timer->deleteLater(); status(QCoreApplication::translate("Kemu", "The updater is not ready. The emulator remains open. Restart Kemu to recover.")); mBusy = false; refresh(); }
             }); timer->start(200);
         } catch (const std::exception& e) { status(QString::fromUtf8(e.what())); }
-    });
+    }, [this](const QString& error, bool) { updateFailed(error, false); });
 }
 }
 

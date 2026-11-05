@@ -174,6 +174,41 @@ static void checkFullInstallerPrompt() {
         }
     }
 }
+static void checkUpdateFailureVisibility() {
+    using namespace kemu::update;
+    const auto failure = QStringLiteral("Update could not be completed. Please try again later.\n");
+    for (const auto [automatic, network] : {std::pair{true, true}, std::pair{true, false}, std::pair{false, true}}) {
+        QTemporaryDir temporary;
+        const fs::path root(temporary.path().toStdWString());
+        qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
+        qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
+        writeText(root/"VERSION.txt","v0.1.0\n");
+        if (!network) writeText(root/".kemu-update-pending","{}");
+        kemu::setUiLanguage("en");
+        QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",automatic);
+        QWidget window;
+        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},
+            []() -> Json { throw NetworkError("HTTPS request failed; check your connection"); });
+        auto* dialog = window.findChild<QDialog*>("KemuSettings");
+        dialog->setAttribute(Qt::WA_DontShowOnScreen);
+        auto* status = dialog->findChild<QLabel*>("KemuUpdateStatus");
+        QEventLoop wait;
+        QTimer poll, deadline;
+        QObject::connect(&poll,&QTimer::timeout,[&] { if (status->text().startsWith(failure)) wait.quit(); });
+        QObject::connect(&deadline,&QTimer::timeout,&wait,&QEventLoop::quit);
+        poll.start(10); deadline.start(8000);
+        if (!automatic) dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
+        wait.exec(); controller.stop();
+        const QString error = network ? "HTTPS request failed; check your connection" : "An unfinished update needs recovery; restart Kemu";
+        require(status->text() == failure + error, "Update failure must keep the error in the update status");
+        if (automatic && network) {
+            require(!dialog->isVisible(), "Automatic network failure must not open settings");
+        } else {
+            require(dialog->isVisible() && dialog->findChild<QListWidget*>("KemuSettingsTabs")->currentRow() == 2,
+                    "Update failure that needs attention must open the Updates page");
+        }
+    }
+}
 int main(int argc, char** argv) {
     QApplication app(argc, argv); app.setQuitOnLastWindowClosed(false); QTemporaryDir temporary;
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
@@ -226,6 +261,10 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && QString::fromUtf8(argv[1]) == "major") {
         try { checkFullInstallerPrompt(); std::cout << "Full installer UI checks passed\n"; return 0; }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
+    if (argc > 1 && QString::fromUtf8(argv[1]) == "failure") {
+        try { checkUpdateFailureVisibility(); std::cout << "Update failure UI checks passed\n"; return 0; }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     }
     if (argc == 5 && QString::fromUtf8(argv[1]) == "growth") {
