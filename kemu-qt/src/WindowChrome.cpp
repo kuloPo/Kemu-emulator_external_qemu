@@ -256,6 +256,9 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         mRequestedSize = available;
         mDisplay->doResize(available);
     });
+    mDisplayRecovery.setSingleShot(true);
+    mDisplayRecovery.setInterval(150);
+    connect(&mDisplayRecovery, &QTimer::timeout, this, &WindowChrome::recoverDisplayGeometry);
     connect(&mBootPoll, &QTimer::timeout, this, &WindowChrome::pollBoot);
     mBootPoll.start(100);
     const QRect available = container->screen()->availableGeometry();
@@ -296,10 +299,16 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     SetWindowLongPtrW(handle, GWL_STYLE, GetWindowLongPtrW(handle, GWL_STYLE) |
                       WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
     connect(container->windowHandle(), &QWindow::screenChanged, this, [this](QScreen* screen) {
+        // Update the minimum at once in every window state; only the size repair waits.
         const QSize display = mDisplay->backingSurfaceSize();
         if (screen && !display.isEmpty())
             mContainer->setMinimumSize(windowSizing(display, screen->availableGeometry().size()).minimum);
+        watchScreen(screen);
+        requestDisplayRecovery();
     });
+    watchScreen(container->screen());
+    connect(qApp, &QGuiApplication::screenAdded, this, [this](QScreen*) { requestDisplayRecovery(); });
+    connect(qApp, &QGuiApplication::screenRemoved, this, [this](QScreen*) { requestDisplayRecovery(); });
     const DWMNCRENDERINGPOLICY noFrame = DWMNCRP_DISABLED;
     DwmSetWindowAttribute(handle, DWMWA_NCRENDERING_POLICY, &noFrame, sizeof(noFrame));
     const QString instance = qEnvironmentVariable("KEMU_INSTANCE");
@@ -334,10 +343,73 @@ void WindowChrome::layout() {
     layoutFrameRate();
     mLayoutActive = false;
     requestResize();
+    if (mDisplayRecoveryPending) mDisplayRecovery.start();
 }
 
 void WindowChrome::requestResize() {
     if (!mResize.isActive()) mResize.start();
+}
+
+void WindowChrome::watchScreen(QScreen* screen) {
+    for (const auto& connection : mScreenConnections) disconnect(connection);
+    mScreenConnections.clear();
+    if (!screen) return;
+    mScreenConnections = {
+        connect(screen, &QScreen::geometryChanged, this, &WindowChrome::requestDisplayRecovery),
+        connect(screen, &QScreen::availableGeometryChanged, this, &WindowChrome::requestDisplayRecovery),
+        connect(screen, &QScreen::logicalDotsPerInchChanged, this, &WindowChrome::requestDisplayRecovery),
+        connect(screen, &QScreen::physicalDotsPerInchChanged, this, &WindowChrome::requestDisplayRecovery)};
+}
+
+void WindowChrome::requestDisplayRecovery() {
+    if (mClosing) return;
+    mRequestedSize = {};
+    mDisplayRecoveryPending = true;
+    mDisplayRecovery.start();
+}
+
+// Snapped windows keep the size Windows assigns to their snap area.
+static bool isArranged(QWidget* window) {
+#ifdef _WIN32
+    static const auto arranged = reinterpret_cast<decltype(&IsWindowArranged)>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "IsWindowArranged"));
+    return arranged && arranged(reinterpret_cast<HWND>(window->winId()));
+#else
+    Q_UNUSED(window);
+    return false;
+#endif
+}
+
+void WindowChrome::recoverDisplayGeometry() {
+    if (mClosing || !mDisplayRecoveryPending || mContainer->isMinimized() || !mResizeStartSize.isEmpty()) return;
+    const QSize display = mDisplay->backingSurfaceSize();
+    QScreen* screen = mContainer->screen();
+    if (display.isEmpty() || !screen) return;
+    const QRect available = screen->availableGeometry();
+    // Maximized and full-screen windows are repaired once they return to the normal state.
+    const bool normal = !mContainer->isMaximized() && !mContainer->isFullScreen();
+    if (normal) {
+        mRequestedSize = {};
+        mDisplayRecoveryPending = false;
+    }
+    mContainer->setMinimumSize(windowSizing(display, available.size()).minimum);
+    if (normal && !isArranged(mContainer)) {
+        const QRect current = mContainer->geometry();
+        // Only trim the settled normal size; an off-screen or spanning window is not pulled back.
+        const QSize size = fitWindowSize(current.size(), display, current.size() - mContainer->viewport()->size(),
+                                         mContainer->minimumSize(), current.size());
+        if (size != current.size()) {
+            // Keep an edge that touches the right or bottom of the work area there,
+            // allowing one pixel of DPI rounding.
+            QPoint origin = current.topLeft();
+            if (qAbs(current.right() - available.right()) <= 1 && current.left() > available.left())
+                origin.rx() += current.width() - size.width();
+            if (qAbs(current.bottom() - available.bottom()) <= 1 && current.top() > available.top())
+                origin.ry() += current.height() - size.height();
+            mContainer->setGeometry(QRect(origin, size));
+        }
+    }
+    requestResize();
 }
 
 void WindowChrome::surfaceChanged() {
@@ -358,6 +430,7 @@ void WindowChrome::surfaceChanged() {
         mRequestedSize = {};
     }
     mHaveSurface = true;
+    if (mDisplayRecoveryPending && !mDisplayRecovery.isActive()) mDisplayRecovery.start();
     requestResize();
     if (!mReady || mClosing) mLoading->raise();
     layoutFrameRate();
@@ -469,6 +542,7 @@ void WindowChrome::checkAdb() {
 
 void WindowChrome::updateWindowState() {
     applyPendingWindowSize();
+    if (mDisplayRecoveryPending) mDisplayRecovery.start();
     const bool maximized = mContainer->isMaximized();
     mMaximize->setIconType(maximized ? Icon::Restore : Icon::Maximize);
     const QString label = maximized ? QCoreApplication::translate("Kemu", "Restore") : QCoreApplication::translate("Kemu", "Maximize");
@@ -532,6 +606,7 @@ void WindowChrome::beginClose() {
     setShowFrameRate(false);
     mBootPoll.stop();
     mResize.stop();
+    mDisplayRecovery.stop();
     mMute->cancel();
     mRotation->stop();
     for (auto* button : mButtons) button->setEnabled(false);
@@ -546,12 +621,16 @@ bool WindowChrome::nativeEvent(void* message, qintptr* result) {
     auto* msg = static_cast<MSG*>(message);
     if (msg->message == WM_NCCALCSIZE && msg->wParam) { *result = 0; return true; }
     if (msg->message == WM_NCACTIVATE) { *result = TRUE; return true; }
+    if (msg->message == WM_DISPLAYCHANGE || msg->message == WM_DPICHANGED) requestDisplayRecovery();
     if (msg->message == WM_ENTERSIZEMOVE) {
         RECT rect{};
         mResizeStartSize = GetWindowRect(msg->hwnd, &rect)
             ? QSize(rect.right - rect.left, rect.bottom - rect.top) : QSize();
     }
-    if (msg->message == WM_EXITSIZEMOVE) mResizeStartSize = {};
+    if (msg->message == WM_EXITSIZEMOVE) {
+        mResizeStartSize = {};
+        if (mDisplayRecoveryPending) mDisplayRecovery.start();
+    }
     if (msg->message == WM_SIZING && !IsZoomed(msg->hwnd) && !mContainer->isFullScreen()) {
         Qt::Edges edges;
         switch (msg->wParam) {

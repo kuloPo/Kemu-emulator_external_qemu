@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QScreen>
 #include <QTimer>
+#include <QWindow>
 #include "android/skin/qt/emulator-container.h"
 #include "android/skin/qt/emulator-qt-window.h"
 #include <windows.h>
@@ -36,6 +37,7 @@ private:
         QFile file(qEnvironmentVariable("KEMU_RESIZE_TEST_RESULTS"));
         if (file.open(QIODevice::WriteOnly)) file.write(QJsonDocument(QJsonObject{
             {"passed",error.isEmpty()}, {"error",error}, {"steps",mChecks},
+            {"displayRecoveryChecks",mRecoveryCase},
             {"dpr",mRoot->devicePixelRatioF()}, {"viewportWidth",viewport.width()},
             {"viewportHeight",viewport.height()}, {"surfaceWidth",surface.width()},
             {"surfaceHeight",surface.height()}}).toJson());
@@ -43,7 +45,98 @@ private:
         mRoot->setGeometry(mOriginal);
         if (qEnvironmentVariableIsSet("KEMU_RESIZE_TEST_EXIT")) mRoot->close();
     }
+    enum RecoveryCase {
+        DisplayBeforeResize, DisplayAfterResize, WindowScreenChanged, ScreenGeometryChanged,
+        WorkAreaChanged, LogicalDpiChanged, PhysicalDpiChanged, Minimized, Maximized,
+        MaximizedScreenChanged, FullScreen, UnchangedOffscreen, FlushEdges, NoDisplayChange,
+        ActiveSurfaceUpdates, RecoveryCaseCount
+    };
+    bool recoveryMaximized() const {
+        return mRecoveryCase == Maximized || mRecoveryCase == MaximizedScreenChanged;
+    }
+    void tickRecovery() {
+        if (!mRecoveryStarted) {
+            mRecoveryStarted = true;
+            mRecoveryRestored = false;
+            mRoot->showNormal();
+            mRoot->setGeometry(mBase);
+            const QSize damaged = mBase.size() + (mRecoveryCase == DisplayAfterResize ? QSize(80,0) : QSize(0,80));
+            const QRect work = mRoot->screen()->availableGeometry();
+            if (recoveryMaximized()) mRoot->showMaximized();
+            else if (mRecoveryCase == FullScreen) mRoot->showFullScreen();
+            else if (mRecoveryCase == UnchangedOffscreen)
+                mRoot->move(mBase.x(), work.bottom() + 1 - mBase.height()/2);
+            else if (mRecoveryCase == FlushEdges)
+                mRoot->setGeometry(QRect(work.bottomRight() + QPoint(1,1) - QPoint(damaged.width(), damaged.height()), damaged));
+            else if (mRecoveryCase != DisplayBeforeResize) mRoot->resize(damaged);
+            if (mRecoveryCase == Minimized) mRoot->showMinimized();
+            mRecoveryExpected = mBase;
+            if (mRecoveryCase == UnchangedOffscreen || mRecoveryCase == NoDisplayChange)
+                mRecoveryExpected = mRoot->geometry();
+            else if (mRecoveryCase == FlushEdges)
+                mRecoveryExpected.moveBottomRight(mRoot->geometry().bottomRight());
+            QScreen* screen = mRoot->screen();
+            // A stale minimum would let WM_GETMINMAXINFO grow the maximized window past the work area.
+            const QSize minimum = windowSizing(mDisplay->backingSurfaceSize(), screen->availableGeometry().size()).minimum;
+            if (mRecoveryCase == MaximizedScreenChanged) mRoot->setMinimumSize(minimum - QSize(1,1));
+            switch (mRecoveryCase) {
+                case WindowScreenChanged:
+                case MaximizedScreenChanged: mRoot->windowHandle()->screenChanged(screen); break;
+                case ScreenGeometryChanged: screen->geometryChanged(screen->geometry()); break;
+                case WorkAreaChanged: screen->availableGeometryChanged(screen->availableGeometry()); break;
+                case LogicalDpiChanged: screen->logicalDotsPerInchChanged(screen->logicalDotsPerInch()); break;
+                case PhysicalDpiChanged: screen->physicalDotsPerInchChanged(screen->physicalDotsPerInch()); break;
+                case NoDisplayChange: break;
+                default:
+                    SendMessageW(handle(), WM_DISPLAYCHANGE, 32,
+                        MAKELPARAM(qRound(screen->size().width() * mRoot->devicePixelRatioF()),
+                                   qRound(screen->size().height() * mRoot->devicePixelRatioF())));
+                    break;
+            }
+            if (mRecoveryCase == MaximizedScreenChanged && mRoot->minimumSize() != minimum) {
+                finish("Screen change left a stale minimum size on a maximized window"); return;
+            }
+            if (mRecoveryCase == DisplayBeforeResize)
+                QTimer::singleShot(80, this, [this, damaged] { mRoot->resize(damaged); });
+            mElapsed.restart();
+            return;
+        }
+        if (mRecoveryCase == ActiveSurfaceUpdates) mRoot->kemuSurfaceChanged();
+        if (mElapsed.elapsed() < 600) return;
+        if (mRecoveryCase == Minimized && !mRecoveryRestored) {
+            if (!mRoot->isMinimized()) { finish("Display recovery restored a minimized window"); return; }
+            mRecoveryRestored = true;
+            mRoot->showNormal();
+            mElapsed.restart();
+            return;
+        }
+        if ((recoveryMaximized() && !mRoot->isMaximized()) ||
+            (mRecoveryCase == FullScreen && !mRoot->isFullScreen())) {
+            finish("Display recovery changed the window state"); return;
+        }
+        if (recoveryMaximized() || mRecoveryCase == FullScreen) {
+            MONITORINFO monitor{sizeof(MONITORINFO)};
+            GetMonitorInfoW(MonitorFromWindow(handle(), MONITOR_DEFAULTTONEAREST), &monitor);
+            const RECT bounds = recoveryMaximized() ? monitor.rcWork : monitor.rcMonitor;
+            const QRect expected(bounds.left, bounds.top, bounds.right-bounds.left, bounds.bottom-bounds.top);
+            if (nativeRect() != expected) { finish("Display recovery changed maximized or full-screen bounds"); return; }
+        } else if (mRoot->geometry() != mRecoveryExpected) {
+            finish(QString("Display recovery changed or failed to repair geometry at case %1").arg(mRecoveryCase)); return;
+        }
+        if (!recoveryMaximized() && mRecoveryCase != FullScreen && mRecoveryCase != NoDisplayChange) {
+            const QSize gap = mRoot->viewport()->size() - mDisplay->size();
+            if (qAbs(gap.width()) > 1 || qAbs(gap.height()) > 1) {
+                if (mElapsed.elapsed() < 10000) return;
+                finish(QString("Display recovery left black bars at case %1").arg(mRecoveryCase)); return;
+            }
+        }
+        ++mRecoveryCase;
+        mRecoveryStarted = false;
+        mRoot->showNormal();
+        mRoot->setGeometry(mBase);
+    }
     void tick() {
+        if (mRecoveryCase < RecoveryCaseCount) { tickRecovery(); return; }
         static const int positions[] = {0,3,6,9,12,15,12,9,6,3,0,-3,-6,-9,-12,-15,3000,-3000};
         if (mCase >= 48) {
             if (mCase == 48) {
@@ -132,11 +225,14 @@ private:
     EmulatorContainer* mRoot;
     EmulatorQtWindow* mDisplay;
     QRect mOriginal, mBase, mStart;
+    QRect mRecoveryExpected;
     QRegion mAllowed;
     QSize mPrevious, mRestored;
     QTimer mTimer;
     QElapsedTimer mElapsed;
     int mCase = 0, mStep = 0, mChecks = 0;
+    int mRecoveryCase = 0;
+    bool mRecoveryStarted = false, mRecoveryRestored = false;
 };
 
 void startResizeGuiChecks(EmulatorContainer* root, EmulatorQtWindow* display) {

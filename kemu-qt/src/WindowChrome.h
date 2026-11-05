@@ -13,6 +13,7 @@ class IconButton;
 class QLabel;
 class QWidget;
 class QEvent;
+class QScreen;
 
 namespace kemu {
 class AndroidMute;
@@ -42,6 +43,9 @@ private:
     void writeDiagnostics();
     void checkAdb();
     void applyPendingWindowSize();
+    void watchScreen(QScreen* screen);
+    void requestDisplayRecovery();
+    void recoverDisplayGeometry();
     void setShowFrameRate(bool show);
     void updateFrameRate();
     void layoutFrameRate();
@@ -60,6 +64,8 @@ private:
     UpdateController* mUpdates = nullptr;
     QVector<IconButton*> mButtons;
     QTimer mResize;
+    QTimer mDisplayRecovery;
+    QVector<QMetaObject::Connection> mScreenConnections;
     QTimer mBootPoll;
     QTimer mFrameRatePoll;
     QSize mRequestedSize;
@@ -72,6 +78,7 @@ private:
     int mGuestRotation = -1;
     bool mLayoutActive = false;
     bool mHaveSurface = false;
+    bool mDisplayRecoveryPending = false;
     bool mReady = false;
     bool mClosing = false;
     bool mAdbChecked = false;
