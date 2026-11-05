@@ -178,7 +178,11 @@ bool UpdateController::eventFilter(QObject* watched, QEvent* event) {
     }
     return QObject::eventFilter(watched,event);
 }
-void UpdateController::stop() { mClosing = true; mCancel = true; if (mWorker) { mWorker->wait(); delete mWorker; mWorker = nullptr; } }
+void UpdateController::stop() {
+    mClosing = true; mCancel = true;
+    if (mFullInstallerPrompt) mFullInstallerPrompt->close();
+    if (mWorker) { mWorker->wait(); delete mWorker; mWorker = nullptr; }
+}
 void UpdateController::showSettings() { mDialog->show(); mDialog->raise(); mDialog->activateWindow(); }
 void UpdateController::status(const QString& text) {
     if (QThread::currentThread() != thread()) { QMetaObject::invokeMethod(this, [this, text] { if (!mClosing) mStatus->setText(text); }, Qt::QueuedConnection); }
@@ -386,7 +390,7 @@ void UpdateController::startup() {
     if (mAutoUpdate->isChecked() || fs::exists(mRoot / ".kemu-update")) check(true);
 }
 void UpdateController::check(bool automatic) {
-    if (mBusy || fs::exists(storage::requestPath(mAvd))) return;
+    if (mBusy || mFullInstallerPrompt || fs::exists(storage::requestPath(mAvd))) return;
     if (!refreshVersion()) {
         status(QString());
         if (!automatic) {
@@ -413,27 +417,33 @@ void UpdateController::check(bool automatic) {
         mDownloaded = loadDownloadedUpdate(mRoot, mStage, mPlan);
     }, [this, automatic] {
         setVersion(QString::fromStdString(mPlan.current));
+        const bool shouldPrompt = !automatic || mAutoUpdate->isChecked();
         if (mPlan.requiresFullInstaller) {
             const auto message = QCoreApplication::translate("Kemu", "A major update is available. Please download the full installer.");
             status(message);
-            if (!automatic) {
-                UiMessageBox prompt(QMessageBox::Information, QCoreApplication::translate("Kemu", "Major update available"),
-                    message, QMessageBox::NoButton, mDialog);
-                prompt.setObjectName("KemuFullInstallerRequired");
-                auto* download = prompt.addButton(QCoreApplication::translate("Kemu", "Download full installer"), QMessageBox::AcceptRole);
-                prompt.addButton(QCoreApplication::translate("Kemu", "Cancel"), QMessageBox::RejectRole);
-                prompt.exec();
-                if (prompt.clickedButton() == download) QDesktopServices::openUrl(QUrl(QString::fromUtf8(ReleasesUrl)));
+            if (shouldPrompt) {
+                auto* prompt = new UiMessageBox(QMessageBox::Information, QCoreApplication::translate("Kemu", "Major update available"),
+                    message, QMessageBox::NoButton, mDialog->isVisible() ? mDialog : mWindow);
+                mFullInstallerPrompt = prompt;
+                prompt->setObjectName("KemuFullInstallerRequired");
+                prompt->setAttribute(Qt::WA_DeleteOnClose);
+                auto* download = prompt->addButton(QCoreApplication::translate("Kemu", "Download full installer"), QMessageBox::AcceptRole);
+                prompt->addButton(QCoreApplication::translate("Kemu", "Cancel"), QMessageBox::RejectRole);
+                connect(prompt, &QDialog::finished, this, [this, prompt, download] {
+                    if (!mClosing && prompt->clickedButton() == download)
+                        QDesktopServices::openUrl(QUrl(QString::fromUtf8(ReleasesUrl)));
+                });
+                prompt->open();
             }
             return;
         }
         if (mDownloaded) {
             status(QCoreApplication::translate("Kemu", "Update ready. Click Check for updates to continue installation."));
-            if (!automatic || mAutoUpdate->isChecked()) offerInstall();
+            if (shouldPrompt) offerInstall();
             return;
         }
         if (mPlan.current == mPlan.target) status(QCoreApplication::translate("Kemu", "You are up to date."));
-        else { status(QCoreApplication::translate("Kemu", "Version %1 is available; %2 files need updating. ").arg(QString::fromStdString(mPlan.target)).arg(mPlan.files.size())); if (automatic && !mAutoUpdate->isChecked()) return; if (automatic || [this] {
+        else { status(QCoreApplication::translate("Kemu", "Version %1 is available; %2 files need updating. ").arg(QString::fromStdString(mPlan.target)).arg(mPlan.files.size())); if (!shouldPrompt) return; if (automatic || [this] {
             UiMessageBox prompt(QMessageBox::Question, QCoreApplication::translate("Kemu", "New version available"),
                 QCoreApplication::translate("Kemu", "Version %1 is available. Download the update?").arg(QString::fromStdString(mPlan.target)), QMessageBox::NoButton, mDialog);
             auto* yes = prompt.addButton(QCoreApplication::translate("Kemu", "Yes"), QMessageBox::YesRole);

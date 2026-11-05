@@ -1,5 +1,6 @@
 #pragma once
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QByteArray>
@@ -43,6 +44,7 @@ private:
                           int timeout = 120000, bool cancellable = true);
     QWidget* mWindow;
     QDialog* mDialog;
+    QPointer<QDialog> mFullInstallerPrompt;
     QLabel* mStatus;
     QLabel* mVersion;
     QLabel* mAboutVersion;

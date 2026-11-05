@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QProgressBar>
 #include <QSettings>
@@ -124,8 +125,13 @@ static void checkPerformanceLifecycle(const QString& root) {
 }
 static void checkFullInstallerPrompt() {
     using namespace kemu::update;
+    enum class Dismiss { Cancel, Stop, DestroyParent };
+    struct Scenario { bool automatic, enabled, cached; Dismiss dismiss; };
     for (const bool intermediate : {false, true}) {
-        for (const bool automatic : {false, true}) {
+        for (const auto scenario : {Scenario{false, false, true, Dismiss::Cancel},
+                                    Scenario{true, true, true, Dismiss::Stop},
+                                    Scenario{true, true, false, Dismiss::DestroyParent},
+                                    Scenario{true, false, true, Dismiss::Stop}}) {
             QTemporaryDir temporary;
             const fs::path root(temporary.path().toStdWString());
             qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
@@ -135,39 +141,65 @@ static void checkFullInstallerPrompt() {
                 {{"version","v0.1.0"},{"files",Json::array()}},
                 {{"version","v0.2.0"},{"files",{"a.dll"}}}})}};
             const auto stage = root/".kemu-update";
-            prepareUpdateTask(root,history);
-            writeText(stage/"payload/a.dll","cached");
-            writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
-            saveDownloadedUpdate(stage,resolve(history,"v0.1.0"));
+            if (scenario.cached) {
+                prepareUpdateTask(root,history);
+                writeText(stage/"payload/a.dll","cached");
+                writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
+                saveDownloadedUpdate(stage,resolve(history,"v0.1.0"));
+            }
             history["releases"][1]["files"] = Json::array();
             if (intermediate) history["releases"].push_back({{"version","v0.3.0"},{"files",{"a.dll"}}});
-            kemu::setUiLanguage(automatic ? "en" : "zh-CN");
-            QWidget window;
-            kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&]{return history;});
-            auto* dialog = window.findChild<QDialog*>("KemuSettings");
+            kemu::setUiLanguage(scenario.automatic ? "en" : "zh-CN");
+            auto window = std::make_unique<QWidget>();
+            window->setAttribute(Qt::WA_DontShowOnScreen); window->show();
+            auto* controller = new kemu::UpdateController(window.get(),[]{return QString();},[]{return QString();},[&]{return history;});
+            auto* dialog = window->findChild<QDialog*>("KemuSettings");
             dialog->setAttribute(Qt::WA_DontShowOnScreen);
-            dialog->findChild<QCheckBox*>("KemuAutoUpdate")->setChecked(automatic);
-            bool offered = false, correct = false;
+            dialog->findChild<QCheckBox*>("KemuAutoUpdate")->setChecked(scenario.enabled);
+            if (!scenario.automatic) controller->showSettings();
+            auto* check = dialog->findChild<QPushButton*>("KemuCheckUpdate");
+            auto* status = dialog->findChild<QLabel*>("KemuUpdateStatus");
+            const auto message = scenario.automatic
+                ? QStringLiteral("A major update is available. Please download the full installer.")
+                : QStringLiteral("\u6709\u91cd\u5927\u66f4\u65b0\uff0c\u8bf7\u524d\u5f80\u4e0b\u8f7d\u5b8c\u6574\u7248\u3002");
+            bool offered = false, correct = false, completed = false, timedOut = false;
+            QPointer<QMessageBox> prompt;
             QEventLoop wait;
             QTimer poll, deadline;
+            deadline.setSingleShot(true);
             QObject::connect(&poll,&QTimer::timeout,[&] {
-                if (auto* box = window.findChild<QMessageBox*>()) {
-                    offered = box->objectName() == "KemuFullInstallerRequired";
-                    correct = box->text() == (automatic
-                        ? QStringLiteral("A major update is available. Please download the full installer.")
-                        : QStringLiteral("\u6709\u91cd\u5927\u66f4\u65b0\uff0c\u8bf7\u524d\u5f80\u4e0b\u8f7d\u5b8c\u6574\u7248\u3002"));
-                    correct = correct && box->buttons().size() == 2;
-                    box->reject(); wait.quit();
+                if (auto* box = window->findChild<QMessageBox*>("KemuFullInstallerRequired"); box && box->isVisible()) {
+                    offered = true; prompt = box; completed = check->isEnabled();
+                    correct = box->text() == message && box->buttons().size() == 2 &&
+                        box->parentWidget() == (dialog->isVisible() ? dialog : window.get());
+                    if (!completed || !correct) box->reject();
+                    wait.quit();
+                } else if (check->isEnabled() && status->text() == message) {
+                    completed = true; wait.quit();
                 }
             });
             QObject::connect(&deadline,&QTimer::timeout,[&] {
-                for (auto* box : window.findChildren<QMessageBox*>()) box->reject();
+                timedOut = true;
+                for (auto* box : window->findChildren<QMessageBox*>()) box->reject();
                 wait.quit();
             });
-            poll.start(10); deadline.start(5000);
-            dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
-            wait.exec(); controller.stop();
-            require(offered && correct,"Manual check must offer the translated full installer instead of cached installation");
+            poll.start(10); deadline.start(15000);
+            if (!scenario.automatic) check->click();
+            wait.exec(); poll.stop(); deadline.stop();
+            require(!timedOut,"Full installer check did not complete before the deadline");
+            require(completed,"Full installer prompt must not block update completion");
+            require(offered == (!scenario.automatic || scenario.enabled),"Full installer prompt must respect the current automatic update setting");
+            require(!offered || correct,"Full installer prompt must be translated and owned by the visible window");
+            if (scenario.dismiss == Dismiss::DestroyParent) {
+                window.reset();
+                require(prompt.isNull(),"Destroying the window must safely destroy its open update prompt");
+            } else {
+                if (scenario.dismiss == Dismiss::Cancel && prompt) prompt->reject();
+                controller->stop();
+                require(!prompt || !prompt->isVisible(),"Stopping updates must dismiss the full installer prompt");
+                QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+                require(prompt.isNull(),"Dismissed full installer prompts must be deleted");
+            }
             require(readVersion(root)=="v0.1.0" && !fs::exists(root/".kemu-update-pending") &&
                     !fs::exists(stage/"job.json") && !fs::exists(root/".kemu-update-history.tmp"),
                     "Full installer check must not prepare an installation or leave downloaded history");
