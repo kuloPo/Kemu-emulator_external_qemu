@@ -911,6 +911,10 @@ android_target_link_libraries(libqemu2-util windows
 target_compile_definitions(libqemu2-util PRIVATE "-DPOISON_CONFIG_ANDROID")
 
 if(WINDOWS_MSVC_X86_64)
+  android_add_test(TARGET kemu-win32-poll-tests
+                   SRC tests/test-win32-poll.cpp
+                   DEPS gmock_main glib2)
+  target_include_directories(kemu-win32-poll-tests PRIVATE include)
   android_add_test(TARGET kemu-write-through-tests
                    SRC tests/test-win32-write-through.cpp
                    DEPS gmock_main)

@@ -23,7 +23,7 @@
 
 
 #ifdef _WIN32
-#include <winsock2.h>
+#include "qemu/win32-poll.h"
 #endif
 
 extern "C" {
@@ -77,17 +77,7 @@ static int pollfds_fill(GArray* pollfds, WSAPOLLFD* fds) {
     int sockets_count = 0;
     for (i = 0; i < pollfds->len; i++) {
         GPollFD* pfd = &g_array_index(pollfds, GPollFD, i);
-        int events = pfd->events;
-        fds[i].events = 0;
-        if (events & G_IO_IN) {
-            fds[i].events |= POLLRDNORM;
-        }
-        if (events & G_IO_OUT) {
-            fds[i].events |= POLLOUT;
-        }
-        if (events & G_IO_PRI) {
-            fds[i].events |= POLLRDBAND;
-        }
+        fds[i].events = qemu_win32_poll_events(pfd->events);
 
         if (fds[i].events == 0) {
             fds[i].fd = INVALID_SOCKET;  // ignore this one
@@ -104,19 +94,10 @@ static void pollfds_poll(GArray* pollfds, const WSAPOLLFD* fds) {
     int i;
     for (i = 0; i < pollfds->len; i++) {
         GPollFD* pfd = &g_array_index(pollfds, GPollFD, i);
-        int revents = 0;
+        pfd->revents = 0;
         if (fds[i].fd != INVALID_SOCKET) {
-            if (fds[i].revents & (POLLRDNORM | POLLERR | POLLHUP)) {
-                revents |= G_IO_IN;
-            }
-            if (fds[i].revents & POLLWRNORM) {
-                revents |= G_IO_OUT;
-            }
-            if (fds[i].revents & (POLLERR | POLLHUP | POLLPRI | POLLRDBAND)) {
-                revents |= G_IO_PRI;
-            }
+            pfd->revents = qemu_win32_poll_revents(fds[i].revents, pfd->events);
         }
-        pfd->revents = revents & pfd->events;
     }
 }
 #endif
