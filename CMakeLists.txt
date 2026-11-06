@@ -911,6 +911,10 @@ android_target_link_libraries(libqemu2-util windows
 target_compile_definitions(libqemu2-util PRIVATE "-DPOISON_CONFIG_ANDROID")
 
 if(WINDOWS_MSVC_X86_64)
+  android_add_test(TARGET kemu-write-through-tests
+                   SRC tests/test-win32-write-through.cpp
+                   DEPS gmock_main)
+  target_include_directories(kemu-write-through-tests PRIVATE include)
   android_add_library(TARGET kemu-affinity LICENSE "GPL-2.0-only"
                       SRC util/vcpu-affinity-policy.cpp util/vcpu-affinity-win32.cpp)
   target_include_directories(kemu-affinity PUBLIC include)
@@ -1036,6 +1040,18 @@ if(NOT OPTION_AEMU_LIBS_ONLY)
     LINUX scsi/pr-manager.c)
   target_link_libraries(qemu-img PRIVATE libqemu2-util libqemustub
                                          android-qemu-deps android-emu)
+
+  if(WINDOWS_MSVC_X86_64)
+    set(kemu_win32_test_sources ${qemu-img_sources} block/qcow2-bitmap.c)
+    list(FILTER kemu_win32_test_sources EXCLUDE
+         REGEX "(qemu-img|block/file-win32|block/win32-aio)\\.c$")
+    android_add_test(TARGET kemu-win32-block-tests
+                     SRC tests/test-win32-block.c ${kemu_win32_test_sources}
+                     DEPS libqemu2-util libqemustub android-qemu-deps android-emu)
+    set_source_files_properties(tests/test-win32-block.c PROPERTIES
+                                INCLUDE_DIRECTORIES "${ANDROID_AUTOGEN}/block")
+    set_tests_properties(kemu-win32-block-tests PROPERTIES TIMEOUT 60)
+  endif()
 
   # Kemu for Windows ships only the windowed x86_64 engine.
   if(WINDOWS_MSVC_X86_64)

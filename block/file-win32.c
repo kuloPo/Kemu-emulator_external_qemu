@@ -29,6 +29,8 @@
 #include "qemu/module.h"
 #include "qemu/option.h"
 #include "block/raw-aio.h"
+#include "block/win32-file.h"
+#include "block/win32-write-through.h"
 #include "trace.h"
 #include "block/thread-pool.h"
 #include "qemu/iov.h"
@@ -63,6 +65,7 @@ typedef struct BDRVRawState {
     int type;
     char drive_path[16]; /* format: "d:\" */
     QEMUWin32AIOState *aio;
+    bool durable_writes;
 #ifdef CONFIG_BLOCK_DELAYED_FLUSH
     QEMUTimer flush_timer;
     bool flush_timer_running;
@@ -75,7 +78,7 @@ typedef struct BDRVRawState {
  * Returns the number of bytes handles or -errno in case of an error. Short
  * reads are only returned if the end of the file is reached.
  */
-static size_t handle_aiocb_rw(RawWin32AIOData *aiocb)
+static ssize_t handle_aiocb_rw(RawWin32AIOData *aiocb)
 {
     size_t offset = 0;
     int i;
@@ -96,7 +99,12 @@ static size_t handle_aiocb_rw(RawWin32AIOData *aiocb)
                            len, &ret_count, &ov);
         }
         if (!ret) {
-            ret_count = 0;
+            DWORD error = GetLastError();
+            if (error == ERROR_HANDLE_EOF &&
+                (aiocb->aio_type & QEMU_AIO_READ)) {
+                break;
+            }
+            return win32_file_error(error);
         }
         if (ret_count != len) {
             offset += ret_count;
@@ -124,11 +132,15 @@ static int aio_worker(void *arg)
 {
     RawWin32AIOData *aiocb = arg;
     ssize_t ret = 0;
-    size_t count;
+    ssize_t count;
 
     switch (aiocb->aio_type & QEMU_AIO_TYPE_MASK) {
     case QEMU_AIO_READ:
         count = handle_aiocb_rw(aiocb);
+        if (count < 0) {
+            ret = count;
+            break;
+        }
         if (count < aiocb->aio_nbytes) {
             /* A short read means that we have reached EOF. Pad the buffer
              * with zeros for bytes after EOF. */
@@ -145,7 +157,9 @@ static int aio_worker(void *arg)
         break;
     case QEMU_AIO_WRITE:
         count = handle_aiocb_rw(aiocb);
-        if (count == aiocb->aio_nbytes) {
+        if (count < 0) {
+            ret = count;
+        } else if (count == aiocb->aio_nbytes) {
             ret = 0;
         } else {
             ret = -EINVAL;
@@ -161,7 +175,7 @@ static int aio_worker(void *arg)
         }
 #else  // !CONFIG_BLOCK_DELAYED_FLUSH
         if (!FlushFileBuffers(aiocb->hfile)) {
-            return -EIO;
+            ret = win32_file_error(GetLastError());
         }
 #endif
         break;
@@ -261,30 +275,38 @@ static void raw_attach_aio_context(BlockDriverState *bs,
 static void raw_probe_alignment(BlockDriverState *bs, Error **errp)
 {
     BDRVRawState *s = bs->opaque;
-    DWORD sectorsPerCluster, freeClusters, totalClusters, count;
-    DISK_GEOMETRY_EX dg;
-    BOOL status;
+    Win32FileStorageInfo storage;
+    ULONG alignment_mask;
+    unsigned int memory_alignment;
 
-    if (s->type == FTYPE_CD) {
-        bs->bl.request_alignment = 2048;
+    if (!(bs->open_flags & BDRV_O_NOCACHE)) {
+        bs->bl.request_alignment = BDRV_SECTOR_SIZE;
+        bs->bl.min_mem_alignment = 1;
+        bs->bl.opt_mem_alignment = getpagesize();
         return;
     }
-    if (s->type == FTYPE_HARDDISK) {
-        status = DeviceIoControl(s->hfile, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX,
-                                 NULL, 0, &dg, sizeof(dg), &count, NULL);
-        if (status != 0) {
-            bs->bl.request_alignment = dg.Geometry.BytesPerSector;
-            return;
-        }
-        /* try GetDiskFreeSpace too */
+
+    if (!GetFileInformationByHandleEx(s->hfile, WIN32_FILE_STORAGE_INFO,
+                                     &storage, sizeof(storage)) ||
+        !GetFileInformationByHandleEx(s->hfile, WIN32_FILE_ALIGNMENT_INFO,
+                                     &alignment_mask, sizeof(alignment_mask))) {
+        error_setg_win32(errp, GetLastError(),
+                        "Could not query unbuffered file alignment");
+        return;
     }
 
-    if (s->drive_path[0]) {
-        GetDiskFreeSpace(s->drive_path, &sectorsPerCluster,
-                         &dg.Geometry.BytesPerSector,
-                         &freeClusters, &totalClusters);
-        bs->bl.request_alignment = dg.Geometry.BytesPerSector;
+    memory_alignment = MAX(storage.logical_sector, alignment_mask + 1);
+    memory_alignment = MAX(memory_alignment, storage.physical_atomicity);
+    if (!is_power_of_2(storage.logical_sector) ||
+        storage.logical_sector < BDRV_SECTOR_SIZE ||
+        alignment_mask == ULONG_MAX ||
+        !is_power_of_2(memory_alignment)) {
+        error_setg(errp, "Invalid unbuffered file alignment");
+        return;
     }
+    bs->bl.request_alignment = storage.logical_sector;
+    bs->bl.min_mem_alignment = memory_alignment;
+    bs->bl.opt_mem_alignment = MAX(memory_alignment, getpagesize());
 }
 
 static void raw_parse_flags(int flags, bool use_aio, int *access_flags,
@@ -328,6 +350,11 @@ static QemuOptsList raw_runtime_opts = {
             .type = QEMU_OPT_STRING,
             .help = "host AIO implementation (threads, native)",
         },
+        {
+            .name = "write-through",
+            .type = QEMU_OPT_BOOL,
+            .help = "persist direct writes before completing them",
+        },
         { /* end of list */ }
     },
 };
@@ -362,6 +389,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
     Error *local_err = NULL;
     const char *filename;
     bool use_aio;
+    bool write_through;
     int ret;
 
     s->type = FTYPE_FILE;
@@ -390,16 +418,15 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
     }
 
     raw_parse_flags(flags, use_aio, &access_flags, &overlapped);
-
-    if (filename[0] && filename[1] == ':') {
-        snprintf(s->drive_path, sizeof(s->drive_path), "%c:\\", filename[0]);
-    } else if (filename[0] == '\\' && filename[1] == '\\') {
-        s->drive_path[0] = 0;
-    } else {
-        /* Relative path.  */
-        char buf[MAX_PATH];
-        win32GetCurrentDirectory(MAX_PATH, buf);
-        snprintf(s->drive_path, sizeof(s->drive_path), "%c:\\", buf[0]);
+    write_through = qemu_opt_get_bool(opts, "write-through", false);
+    if (write_through) {
+        if (!use_aio || !(flags & BDRV_O_NOCACHE) || !(flags & BDRV_O_RDWR)) {
+            error_setg(errp, "write-through requires a writable file with "
+                       "cache.direct=on and aio=native");
+            ret = -EINVAL;
+            goto fail;
+        }
+        overlapped |= FILE_FLAG_WRITE_THROUGH;
     }
 
     s->hfile = win32CreateFile(filename, access_flags,
@@ -415,6 +442,17 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
             ret = -EINVAL;
         }
         goto fail;
+    }
+
+    if (write_through && win32_write_through_is_durable(s->hfile, overlapped)) {
+        /* Persist any earlier cached writes and file-size initialization. */
+        if (!FlushFileBuffers(s->hfile)) {
+            error_setg_win32(errp, GetLastError(), "Could not flush '%s'", filename);
+            CloseHandle(s->hfile);
+            ret = -EIO;
+            goto fail;
+        }
+        s->durable_writes = true;
     }
 
     if (use_aio) {
@@ -486,6 +524,23 @@ static BlockAIOCB *raw_aio_flush(BlockDriverState *bs,
     return paio_submit(bs, s->hfile, 0, NULL, 0, cb, opaque, QEMU_AIO_FLUSH);
 }
 
+static int coroutine_fn raw_co_flush_to_disk(BlockDriverState *bs)
+{
+    BDRVRawState *s = bs->opaque;
+    RawWin32AIOData *acb;
+
+    /* Completed write-through writes are already on stable storage. */
+    if (s->durable_writes) {
+        return 0;
+    }
+    acb = g_new0(RawWin32AIOData, 1);
+    acb->bs = bs;
+    acb->hfile = s->hfile;
+    acb->aio_type = QEMU_AIO_FLUSH;
+    return thread_pool_submit_co(aio_get_thread_pool(bdrv_get_aio_context(bs)),
+                                 aio_worker, acb);
+}
+
 static void raw_close(BlockDriverState *bs)
 {
     BDRVRawState *s = bs->opaque;
@@ -537,6 +592,11 @@ static int raw_truncate(BlockDriverState *bs, int64_t offset,
     }
     if (SetEndOfFile(s->hfile) == 0) {
         error_setg_win32(errp, GetLastError(), "SetEndOfFile error");
+        return -EIO;
+    }
+    /* SetEndOfFile is a metadata operation, not a write-through WriteFile. */
+    if (s->durable_writes && !FlushFileBuffers(s->hfile)) {
+        error_setg_win32(errp, GetLastError(), "Could not flush resized file");
         return -EIO;
     }
     return 0;
@@ -681,7 +741,7 @@ BlockDriver bdrv_file = {
 
     .bdrv_aio_readv     = raw_aio_readv,
     .bdrv_aio_writev    = raw_aio_writev,
-    .bdrv_aio_flush     = raw_aio_flush,
+    .bdrv_co_flush_to_disk = raw_co_flush_to_disk,
 
     .bdrv_truncate	= raw_truncate,
     .bdrv_getlength	= raw_getlength,
@@ -773,6 +833,12 @@ static int hdev_open(BlockDriverState *bs, QDict *options, int flags,
     qemu_opts_absorb_qdict(opts, options, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
+        ret = -EINVAL;
+        goto done;
+    }
+
+    if (qemu_opt_get(opts, "write-through")) {
+        error_setg(errp, "write-through is not supported on Windows host devices");
         ret = -EINVAL;
         goto done;
     }

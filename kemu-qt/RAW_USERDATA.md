@@ -4,6 +4,14 @@ Kemu opens `avd/kemu.avd/userdata-qemu.img` directly as a writable RAW block
 device. Userdata uses ext4 with Android encryption enabled.
 `system-img/userdata.img` remains the initialization template.
 
+On Windows, userdata uses native asynchronous, unbuffered write-through I/O.
+Completed writes persist their data before the guest receives completion. For
+regular NTFS files, this also persists the metadata needed to retrieve the data,
+so subsequent flushes do not issue a redundant device-wide cache flush. Opening
+and resizing the file still perform a full flush. Other filesystems keep explicit
+flushes. This mode does not disable guest `fsync` durability or delay completion
+until a periodic background flush.
+
 New Kemu instances default to `128G` (128 GiB). Existing configured capacities
 are preserved. Creating a sparse data image does not require free host space
 equal to its virtual capacity. Startup does not enforce a virtual-capacity

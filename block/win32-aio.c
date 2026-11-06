@@ -28,6 +28,7 @@
 #include "qemu/module.h"
 #include "block/aio.h"
 #include "block/raw-aio.h"
+#include "block/win32-file.h"
 #include "qemu/event_notifier.h"
 #include "qemu/iov.h"
 #include <windows.h>
@@ -53,21 +54,30 @@ typedef struct QEMUWin32AIOCB {
     void *buf;
     bool is_read;
     bool is_linear;
+    DWORD error;
 } QEMUWin32AIOCB;
 
 /*
  * Completes an AIO request (calls the callback and frees the ACB).
  */
 static void win32_aio_process_completion(QEMUWin32AIOState *s,
-    QEMUWin32AIOCB *waiocb, DWORD count)
+    QEMUWin32AIOCB *waiocb, DWORD count, DWORD error)
 {
     int ret;
     s->count--;
 
-    if (waiocb->ov.Internal != 0) {
-        ret = -EIO;
+    if (error == ERROR_HANDLE_EOF && waiocb->is_read) {
+        error = ERROR_SUCCESS;
+        count = 0;
+    }
+    if (error != ERROR_SUCCESS) {
+        ret = win32_file_error(error);
     } else {
         ret = 0;
+        if (waiocb->is_read && !waiocb->is_linear) {
+            QEMUIOVector *qiov = waiocb->qiov;
+            iov_from_buf(qiov->iov, qiov->niov, 0, waiocb->buf, count);
+        }
         if (count < waiocb->nbytes) {
             /* Short reads mean EOF, pad with zeros. */
             if (waiocb->is_read) {
@@ -80,10 +90,6 @@ static void win32_aio_process_completion(QEMUWin32AIOState *s,
     }
 
     if (!waiocb->is_linear) {
-        if (ret == 0 && waiocb->is_read) {
-            QEMUIOVector *qiov = waiocb->qiov;
-            iov_from_buf(qiov->iov, qiov->niov, 0, waiocb->buf, qiov->size);
-        }
         qemu_vfree(waiocb->buf);
     }
 
@@ -99,11 +105,24 @@ static void win32_aio_completion_cb(EventNotifier *e)
     OVERLAPPED *ov;
 
     event_notifier_test_and_clear(&s->e);
-    while (GetQueuedCompletionStatus(s->hIOCP, &count, &key, &ov, 0)) {
-        QEMUWin32AIOCB *waiocb = container_of(ov, QEMUWin32AIOCB, ov);
+    for (;;) {
+        BOOL success = GetQueuedCompletionStatus(s->hIOCP, &count, &key, &ov, 0);
+        DWORD error = success ? ERROR_SUCCESS : GetLastError();
+        QEMUWin32AIOCB *waiocb;
 
-        win32_aio_process_completion(s, waiocb, count);
+        if (!ov) {
+            break;
+        }
+        waiocb = container_of(ov, QEMUWin32AIOCB, ov);
+        win32_aio_process_completion(s, waiocb, count, error);
     }
+}
+
+static void win32_aio_submit_error(void *opaque)
+{
+    QEMUWin32AIOCB *waiocb = opaque;
+
+    win32_aio_process_completion(waiocb->ctx, waiocb, 0, waiocb->error);
 }
 
 static const AIOCBInfo win32_aiocb_info = {
@@ -120,11 +139,12 @@ BlockAIOCB *win32_aio_submit(BlockDriverState *bs,
     DWORD rc;
 
     waiocb = qemu_aio_get(&win32_aiocb_info, bs, cb, opaque);
+    waiocb->ctx = aio;
     waiocb->nbytes = nb_sectors * 512;
     waiocb->qiov = qiov;
     waiocb->is_read = (type == QEMU_AIO_READ);
 
-    if (qiov->niov > 1) {
+    if (qiov->niov > 1 || !bdrv_qiov_is_aligned(bs, qiov)) {
         waiocb->buf = qemu_try_blockalign(bs, qiov->size);
         if (waiocb->buf == NULL) {
             goto out;
@@ -150,13 +170,16 @@ BlockAIOCB *win32_aio_submit(BlockDriverState *bs,
     } else {
         rc = WriteFile(hfile, waiocb->buf, waiocb->nbytes, NULL, &waiocb->ov);
     }
-    if(rc == 0 && GetLastError() != ERROR_IO_PENDING) {
-        goto out_dec_count;
+    if (!rc) {
+        waiocb->error = GetLastError();
+        if (waiocb->error != ERROR_IO_PENDING) {
+            /* The caller must yield before its completion callback runs. */
+            aio_bh_schedule_oneshot(bdrv_get_aio_context(bs),
+                                    win32_aio_submit_error, waiocb);
+        }
     }
     return &waiocb->common;
 
-out_dec_count:
-    aio->count--;
 out:
     qemu_aio_unref(waiocb);
     return NULL;

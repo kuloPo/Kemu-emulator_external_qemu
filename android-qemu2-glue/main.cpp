@@ -728,8 +728,13 @@ private:
                 qCow2Format = false;
                 driveParam +=
                         StringFormat("index=%d,id=userdata,if=none,file=%s"
-                                     ",format=raw,cache=writeback",
+                                     ",format=raw",
                                      m_driveIndex++, filePath.data());
+#ifdef _WIN32
+                driveParam += ",cache=none,aio=native,file.write-through=on";
+#else
+                driveParam += ",cache=writeback";
+#endif
                 deviceParam = StringFormat("%s,drive=userdata",
                                            kTarget.storageDeviceType);
                 break;
