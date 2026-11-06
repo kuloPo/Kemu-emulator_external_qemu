@@ -26,11 +26,15 @@
 #include "sysemu/cpus.h"
 #include "qemu/abort.h"
 #include "qemu/main-loop.h"
+#include "qemu/thread.h"
 #include "hw/boards.h"
+#include "hw/i386/apic_internal.h"
+#include "hw/i386/ioapic.h"
 #include "qemu/error-report.h"
 #include "qemu/queue.h"
 #include "qapi/error.h"
 #include "migration/migration.h"
+#include "whpx-internal.h"
 
 #include <sdkddkver.h>
 #if !defined(NTDDI_WIN10_CO)
@@ -42,11 +46,6 @@
 #include "whpx-simd.h"
 
 #define WHPX_CPUID_SIGNATURE 0x40000000
-
-struct whpx_state {
-    uint64_t mem_quota;
-    WHV_PARTITION_HANDLE partition;
-};
 
 static const WHV_REGISTER_NAME whpx_register_names[] = {
 
@@ -180,6 +179,8 @@ struct whpx_vcpu {
     uint64_t tpr;
     uint64_t apic_base;
     bool interruption_pending;
+    /* Hypervisor APIC: an interrupt window opened for the 8259 output. */
+    bool ready_for_pic_interrupt;
     uint32_t simd_logged;
 
     /* Must be the last field as it may have a tail */
@@ -192,6 +193,323 @@ static HMODULE hWinHvPlatform, hWinHvEmulation;
 static WHV_PROCESSOR_XSAVE_FEATURES whpx_xsave_cap;
 
 struct whpx_state whpx_global;
+
+bool whpx_apic_in_platform(void)
+{
+    return whpx_global.apic_in_platform;
+}
+
+/*
+ * KEMU: VM exit statistics.  KEMU_WHPX_EXIT_STATS=<ms> prints, every <ms>
+ * milliseconds, how many exits of each kind the vCPUs took, how long user
+ * mode spent handling them and the busiest MMIO pages, I/O ports and MSRs,
+ * to KEMU_WHPX_EXIT_STATS_LOG (default stderr).
+ */
+enum {
+    WHPX_STAT_MMIO,
+    WHPX_STAT_MMIO_APIC_EOI,
+    WHPX_STAT_MMIO_APIC_TIMER,
+    WHPX_STAT_MMIO_APIC_ICR,
+    WHPX_STAT_MMIO_APIC_OTHER,
+    WHPX_STAT_IO,
+    WHPX_STAT_MSR,
+    WHPX_STAT_MSR_TSC_DEADLINE,
+    WHPX_STAT_MSR_APIC,
+    WHPX_STAT_IRQ_WINDOW,
+    WHPX_STAT_HALT,
+    WHPX_STAT_CANCELED,
+    WHPX_STAT_CPUID,
+    WHPX_STAT_APIC_EOI,
+    WHPX_STAT_APIC_INIT_SIPI,
+    WHPX_STAT_OTHER,
+    WHPX_STAT_NR_EXITS,
+    /* Events that are not exits. */
+    WHPX_STAT_INJECT = WHPX_STAT_NR_EXITS,
+    WHPX_STAT_KICK,
+    WHPX_STAT_NR,
+};
+
+static const char *const whpx_stat_names[WHPX_STAT_NR] = {
+    [WHPX_STAT_MMIO] = "mmio",
+    [WHPX_STAT_MMIO_APIC_EOI] = "apic-eoi",
+    [WHPX_STAT_MMIO_APIC_TIMER] = "apic-timer",
+    [WHPX_STAT_MMIO_APIC_ICR] = "apic-icr",
+    [WHPX_STAT_MMIO_APIC_OTHER] = "apic-other",
+    [WHPX_STAT_IO] = "io",
+    [WHPX_STAT_MSR] = "msr",
+    [WHPX_STAT_MSR_TSC_DEADLINE] = "msr-tscdeadline",
+    [WHPX_STAT_MSR_APIC] = "msr-apic",
+    [WHPX_STAT_IRQ_WINDOW] = "irq-window",
+    [WHPX_STAT_HALT] = "halt",
+    [WHPX_STAT_CANCELED] = "canceled",
+    [WHPX_STAT_CPUID] = "cpuid",
+    [WHPX_STAT_APIC_EOI] = "eoi-exit",
+    [WHPX_STAT_APIC_INIT_SIPI] = "init-sipi",
+    [WHPX_STAT_OTHER] = "other",
+    [WHPX_STAT_INJECT] = "inject",
+    [WHPX_STAT_KICK] = "kick",
+};
+
+/* Keys of the per-vCPU top table; the low 2 bits are the kind. */
+#define WHPX_STAT_KEY_MMIO 1
+#define WHPX_STAT_KEY_IO   2
+#define WHPX_STAT_KEY_MSR  3
+#define WHPX_STAT_TOP      64
+
+typedef struct WhpxStatSlot {
+    uint64_t key;
+    uint64_t count;
+} WhpxStatSlot;
+
+typedef struct WhpxCpuStats {
+    uint64_t count[WHPX_STAT_NR];
+    /* QueryPerformanceCounter ticks spent in user mode per exit reason. */
+    uint64_t ticks[WHPX_STAT_NR];
+    /* Ticks inside WHvRunVirtualProcessor and in the pre-run setup. */
+    uint64_t run_ticks;
+    uint64_t pre_ticks;
+    WhpxStatSlot top[WHPX_STAT_TOP];
+} WhpxCpuStats;
+
+static bool whpx_stats_enabled;
+static unsigned whpx_stats_interval_ms;
+static unsigned whpx_stats_ncpus;
+static WhpxCpuStats *whpx_stats;
+static uint64_t whpx_stats_request_irq;
+static QemuThread whpx_stats_thread;
+
+static inline uint64_t whpx_stats_now(void)
+{
+    LARGE_INTEGER t;
+
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+static WhpxCpuStats *whpx_stats_cpu(CPUState *cpu)
+{
+    if (!whpx_stats_enabled || cpu->cpu_index >= whpx_stats_ncpus) {
+        return NULL;
+    }
+    return &whpx_stats[cpu->cpu_index];
+}
+
+void whpx_stats_count_request_irq(void)
+{
+    if (whpx_stats_enabled) {
+        atomic_inc(&whpx_stats_request_irq);
+    }
+}
+
+static void whpx_stats_count_key(WhpxCpuStats *st, uint64_t key)
+{
+    unsigned i, h = (unsigned)((key >> 2) * 0x9E3779B1u) % WHPX_STAT_TOP;
+
+    for (i = 0; i < WHPX_STAT_TOP; i++) {
+        WhpxStatSlot *slot = &st->top[(h + i) % WHPX_STAT_TOP];
+        if (slot->key == key || !slot->key) {
+            slot->key = key;
+            slot->count++;
+            return;
+        }
+    }
+}
+
+/* Classify the exit in vcpu->exit_ctx and count its target. */
+static int whpx_stats_classify(WhpxCpuStats *st, struct whpx_vcpu *vcpu)
+{
+    WHV_RUN_VP_EXIT_CONTEXT *ctx = &vcpu->exit_ctx;
+    uint64_t gpa, off;
+    uint32_t msr;
+
+    switch (ctx->ExitReason) {
+    case WHvRunVpExitReasonMemoryAccess:
+        gpa = ctx->MemoryAccess.Gpa;
+        if ((gpa & ~0xfffULL) == APIC_DEFAULT_ADDRESS) {
+            off = gpa & 0xff0;
+            if (off == 0xb0) {
+                return WHPX_STAT_MMIO_APIC_EOI;
+            }
+            if (off == 0x320 || off == 0x380 || off == 0x390 ||
+                off == 0x3e0) {
+                return WHPX_STAT_MMIO_APIC_TIMER;
+            }
+            if (off == 0x300 || off == 0x310) {
+                return WHPX_STAT_MMIO_APIC_ICR;
+            }
+            return WHPX_STAT_MMIO_APIC_OTHER;
+        }
+        whpx_stats_count_key(st, (gpa & ~0xfffULL) | WHPX_STAT_KEY_MMIO);
+        return WHPX_STAT_MMIO;
+    case WHvRunVpExitReasonX64IoPortAccess:
+        whpx_stats_count_key(st, ((uint64_t)ctx->IoPortAccess.PortNumber << 2)
+                             | WHPX_STAT_KEY_IO);
+        return WHPX_STAT_IO;
+    case WHvRunVpExitReasonX64MsrAccess:
+        msr = ctx->MsrAccess.MsrNumber;
+        if (msr == MSR_IA32_TSCDEADLINE) {
+            return WHPX_STAT_MSR_TSC_DEADLINE;
+        }
+        if (msr == MSR_IA32_APICBASE || (msr >= 0x800 && msr <= 0x8ff)) {
+            return WHPX_STAT_MSR_APIC;
+        }
+        whpx_stats_count_key(st, ((uint64_t)msr << 2) | WHPX_STAT_KEY_MSR);
+        return WHPX_STAT_MSR;
+    case WHvRunVpExitReasonX64InterruptWindow:
+        return WHPX_STAT_IRQ_WINDOW;
+    case WHvRunVpExitReasonX64Halt:
+        return WHPX_STAT_HALT;
+    case WHvRunVpExitReasonCanceled:
+        return WHPX_STAT_CANCELED;
+    case WHvRunVpExitReasonX64Cpuid:
+        return WHPX_STAT_CPUID;
+    case WHvRunVpExitReasonX64ApicEoi:
+        return WHPX_STAT_APIC_EOI;
+    case WHvRunVpExitReasonX64ApicInitSipiTrap:
+        return WHPX_STAT_APIC_INIT_SIPI;
+    default:
+        return WHPX_STAT_OTHER;
+    }
+}
+
+/* Copy the counters word by word so that no counter is read torn. */
+static void whpx_stats_snapshot(WhpxCpuStats *dst)
+{
+    const uint64_t *src = (const uint64_t *)whpx_stats;
+    uint64_t *d = (uint64_t *)dst;
+    size_t i, words = whpx_stats_ncpus * sizeof(*dst) / sizeof(uint64_t);
+
+    for (i = 0; i < words; i++) {
+        d[i] = atomic_read(&src[i]);
+    }
+}
+
+static int whpx_stats_slot_cmp(const void *a, const void *b)
+{
+    const WhpxStatSlot *x = a, *y = b;
+
+    return x->count < y->count ? 1 : x->count > y->count ? -1 : 0;
+}
+
+static void *whpx_stats_thread_fn(void *opaque)
+{
+    const char *path = getenv("KEMU_WHPX_EXIT_STATS_LOG");
+    unsigned n = whpx_stats_ncpus, top_n = n * WHPX_STAT_TOP;
+    WhpxCpuStats *prev = g_new0(WhpxCpuStats, n);
+    WhpxCpuStats *cur = g_new0(WhpxCpuStats, n);
+    WhpxStatSlot *merged = g_new0(WhpxStatSlot, top_n);
+    uint64_t prev_request_irq = 0, start = whpx_stats_now(), last = start;
+    LARGE_INTEGER freq;
+
+    QueryPerformanceFrequency(&freq);
+
+    for (;;) {
+        uint64_t count[WHPX_STAT_NR] = {0}, ticks[WHPX_STAT_NR] = {0};
+        uint64_t run_ticks = 0, pre_ticks = 0, exits = 0, now, request_irq;
+        double us = 1e6 / (double)freq.QuadPart;
+        unsigned c, i, j, merged_n = 0;
+        FILE *f = NULL;
+
+        Sleep(whpx_stats_interval_ms);
+        whpx_stats_snapshot(cur);
+        request_irq = atomic_read(&whpx_stats_request_irq);
+        now = whpx_stats_now();
+
+        for (c = 0; c < n; c++) {
+            for (i = 0; i < WHPX_STAT_NR; i++) {
+                count[i] += cur[c].count[i] - prev[c].count[i];
+                ticks[i] += cur[c].ticks[i] - prev[c].ticks[i];
+            }
+            run_ticks += cur[c].run_ticks - prev[c].run_ticks;
+            pre_ticks += cur[c].pre_ticks - prev[c].pre_ticks;
+            for (i = 0; i < WHPX_STAT_TOP; i++) {
+                uint64_t key = cur[c].top[i].key;
+                uint64_t delta = cur[c].top[i].count - prev[c].top[i].count;
+                if (!key || !delta) {
+                    continue;
+                }
+                for (j = 0; j < merged_n && merged[j].key != key; j++) {
+                }
+                if (j == merged_n) {
+                    merged[merged_n].key = key;
+                    merged[merged_n++].count = 0;
+                }
+                merged[j].count += delta;
+            }
+        }
+        for (i = 0; i < WHPX_STAT_NR_EXITS; i++) {
+            exits += count[i];
+        }
+
+        /* Reopen the log for every dump so that it can be read meanwhile. */
+        if (path && *path) {
+            f = fopen(path, "a");
+        }
+        if (!f) {
+            f = stderr;
+        }
+
+        fprintf(f, "WHPX exit stats t=%.3fs dt=%.3fs exits=%" PRIu64
+                " run=%.0fms pre-run=%.1fms request-irq=%" PRIu64 "\n",
+                (now - start) * us / 1e6, (now - last) * us / 1e6, exits,
+                run_ticks * us / 1e3, pre_ticks * us / 1e3,
+                request_irq - prev_request_irq);
+        fprintf(f, "  ");
+        for (i = 0; i < WHPX_STAT_NR; i++) {
+            if (!count[i]) {
+                continue;
+            }
+            if (i < WHPX_STAT_NR_EXITS) {
+                fprintf(f, " %s=%" PRIu64 "/%.1fus", whpx_stat_names[i],
+                        count[i], ticks[i] * us / count[i]);
+            } else {
+                fprintf(f, " %s=%" PRIu64, whpx_stat_names[i], count[i]);
+            }
+        }
+        fprintf(f, "\n");
+        if (merged_n) {
+            qsort(merged, merged_n, sizeof(*merged), whpx_stats_slot_cmp);
+            fprintf(f, "  top:");
+            for (j = 0; j < merged_n && j < 8; j++) {
+                uint64_t key = merged[j].key;
+                const char *kind = (key & 3) == WHPX_STAT_KEY_MMIO ? "mmio" :
+                                   (key & 3) == WHPX_STAT_KEY_IO ? "io" :
+                                   "msr";
+                uint64_t where = (key & 3) == WHPX_STAT_KEY_MMIO ?
+                                 (key & ~3ULL) : (key >> 2);
+                fprintf(f, " %s:%" PRIx64 "=%" PRIu64, kind, where,
+                        merged[j].count);
+            }
+            fprintf(f, "\n");
+        }
+        if (f != stderr) {
+            fclose(f);
+        } else {
+            fflush(f);
+        }
+
+        memcpy(prev, cur, n * sizeof(*cur));
+        prev_request_irq = request_irq;
+        last = now;
+    }
+    return NULL;
+}
+
+static void whpx_stats_init(void)
+{
+    const char *env = getenv("KEMU_WHPX_EXIT_STATS");
+    int ms;
+
+    if (!env || (ms = atoi(env)) <= 0) {
+        return;
+    }
+    whpx_stats_interval_ms = ms;
+    whpx_stats_ncpus = max_cpus;
+    whpx_stats = g_new0(WhpxCpuStats, whpx_stats_ncpus);
+    whpx_stats_enabled = true;
+    qemu_thread_create(&whpx_stats_thread, "whpx-stats", whpx_stats_thread_fn,
+                       NULL, QEMU_THREAD_DETACHED);
+}
 
 struct WhpxDoorbell {
     WHV_DOORBELL_MATCH_DATA match;
@@ -1020,6 +1338,10 @@ static void whpx_get_registers(CPUState *cpu)
 
     assert(idx == RTL_NUMBER_OF(whpx_register_names));
 
+    if (whpx_apic_in_platform()) {
+        whpx_apic_get(x86_cpu->apic_state);
+    }
+
     return;
 }
 
@@ -1556,6 +1878,33 @@ static int whpx_handle_halt(CPUState *cpu)
     return ret;
 }
 
+static void whpx_vcpu_wake_from_halt(CPUState *cpu)
+{
+    WHV_REGISTER_NAME name = WHvRegisterInternalActivityState;
+    WHV_REGISTER_VALUE value;
+    HRESULT hr;
+
+    hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, &name, 1, &value);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to get activity state of vCPU %d,"
+                     " hr=%08lx", cpu->cpu_index, hr);
+        return;
+    }
+
+    if (!value.InternalActivity.HaltSuspend) {
+        return;
+    }
+
+    value.InternalActivity.HaltSuspend = 0;
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, &name, 1, &value);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to wake halted vCPU %d, hr=%08lx",
+                     cpu->cpu_index, hr);
+    }
+}
+
 static void whpx_vcpu_pre_run(CPUState *cpu)
 {
     HRESULT hr;
@@ -1567,8 +1916,9 @@ static void whpx_vcpu_pre_run(CPUState *cpu)
     uint8_t tpr;
     WHV_X64_PENDING_INTERRUPTION_REGISTER new_int;
     UINT32 reg_count = 0;
-    WHV_REGISTER_VALUE reg_values[3];
-    WHV_REGISTER_NAME reg_names[3];
+    WHV_REGISTER_VALUE reg_values[4];
+    WHV_REGISTER_NAME reg_names[4];
+    WhpxCpuStats *st = whpx_stats_cpu(cpu);
 
     memset(&new_int, 0, sizeof(new_int));
     memset(reg_values, 0, sizeof(reg_values));
@@ -1605,17 +1955,42 @@ static void whpx_vcpu_pre_run(CPUState *cpu)
     }
 
     /* Get pending hard interruption or replay one that was overwritten */
-    if (!vcpu->interruption_pending &&
-        vcpu->interruptable && (env->eflags & IF_MASK)) {
-        assert(!new_int.InterruptionPending);
-        if (cpu->interrupt_request & CPU_INTERRUPT_HARD) {
-            cpu->interrupt_request &= ~CPU_INTERRUPT_HARD;
-            irq = cpu_get_pic_interrupt(env);
-            if (irq >= 0) {
-                new_int.InterruptionType = WHvX64PendingInterrupt;
-                new_int.InterruptionPending = 1;
-                new_int.InterruptionVector = irq;
+    if (!whpx_apic_in_platform()) {
+        if (!vcpu->interruption_pending &&
+            vcpu->interruptable && (env->eflags & IF_MASK)) {
+            assert(!new_int.InterruptionPending);
+            if (cpu->interrupt_request & CPU_INTERRUPT_HARD) {
+                cpu->interrupt_request &= ~CPU_INTERRUPT_HARD;
+                irq = cpu_get_pic_interrupt(env);
+                if (irq >= 0) {
+                    new_int.InterruptionType = WHvX64PendingInterrupt;
+                    new_int.InterruptionPending = 1;
+                    new_int.InterruptionVector = irq;
+                }
             }
+        }
+    } else if (vcpu->ready_for_pic_interrupt &&
+               (cpu->interrupt_request & CPU_INTERRUPT_HARD)) {
+        /*
+         * The hypervisor APIC delivers everything except the 8259 output,
+         * which is injected as an external interrupt once the guest can
+         * take it.
+         */
+        cpu->interrupt_request &= ~CPU_INTERRUPT_HARD;
+        irq = cpu_get_pic_interrupt(env);
+        if (irq >= 0) {
+            WHV_X64_PENDING_EXT_INT_EVENT ext_int;
+
+            memset(&ext_int, 0, sizeof(ext_int));
+            ext_int.EventPending = 1;
+            ext_int.EventType = WHvX64PendingEventExtInt;
+            ext_int.Vector = irq;
+            reg_values[reg_count].ExtIntEvent = ext_int;
+            reg_names[reg_count] = WHvRegisterPendingEvent;
+            reg_count += 1;
+
+            /* PendingEvent injection does not clear the hypervisor HLT state. */
+            whpx_vcpu_wake_from_halt(cpu);
         }
     }
 
@@ -1624,6 +1999,9 @@ static void whpx_vcpu_pre_run(CPUState *cpu)
         reg_values[reg_count].PendingInterruption = new_int;
         reg_names[reg_count] = WHvRegisterPendingInterruption;
         reg_count += 1;
+        if (st && new_int.InterruptionType == WHvX64PendingInterrupt) {
+            st->count[WHPX_STAT_INJECT]++;
+        }
     }
 
     /* Sync the TPR to the CR8 if was modified during the intercept */
@@ -1647,6 +2025,7 @@ static void whpx_vcpu_pre_run(CPUState *cpu)
     }
 
     qemu_mutex_unlock_iothread();
+    vcpu->ready_for_pic_interrupt = false;
 
     if (reg_count) {
         hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
@@ -1729,15 +2108,122 @@ static void whpx_vcpu_process_async_events(CPUState *cpu)
     return;
 }
 
+void whpx_set_activity_state(CPUState *cpu, bool startup_suspend,
+                             bool halt_suspend)
+{
+    WHV_REGISTER_NAME name = WHvRegisterInternalActivityState;
+    WHV_REGISTER_VALUE value;
+    HRESULT hr;
+
+    memset(&value, 0, sizeof(value));
+    value.InternalActivity.StartupSuspend = startup_suspend;
+    value.InternalActivity.HaltSuspend = halt_suspend;
+    hr = whp_dispatch.WHvSetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, &name, 1, &value);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to set activity state of vCPU %d,"
+                     " hr=%08lx", cpu->cpu_index, hr);
+    }
+}
+
+bool whpx_get_activity_state(CPUState *cpu, bool *startup_suspend,
+                             bool *halt_suspend)
+{
+    WHV_REGISTER_NAME name = WHvRegisterInternalActivityState;
+    WHV_REGISTER_VALUE value;
+    HRESULT hr;
+
+    hr = whp_dispatch.WHvGetVirtualProcessorRegisters(
+        whpx_global.partition, cpu->cpu_index, &name, 1, &value);
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to get activity state of vCPU %d,"
+                     " hr=%08lx", cpu->cpu_index, hr);
+        return false;
+    }
+    *startup_suspend = value.InternalActivity.StartupSuspend;
+    *halt_suspend = value.InternalActivity.HaltSuspend;
+    return true;
+}
+
+static void whpx_request_ipi(WHV_INTERRUPT_CONTROL *ipi)
+{
+    HRESULT hr;
+
+    whpx_stats_count_request_irq();
+    hr = whp_dispatch.WHvRequestInterrupt(whpx_global.partition, ipi,
+                                          sizeof(*ipi));
+    if (FAILED(hr)) {
+        error_report("WHPX: Failed to request %s for APIC %u, hr=%08lx",
+                     ipi->Type == WHvX64InterruptTypeInit ? "INIT" : "SIPI",
+                     ipi->Destination, hr);
+    }
+}
+
+/*
+ * With the hypervisor APIC, INIT and SIPI IPIs trap to user mode after the
+ * ICR write and are forwarded to their targets with WHvRequestInterrupt.
+ */
+static void whpx_handle_init_sipi(CPUState *cpu, uint64_t icr)
+{
+    WHV_INTERRUPT_CONTROL ipi;
+    uint32_t delivery_mode =
+        (icr & APIC_ICR_DELIV_MOD) >> APIC_ICR_DELIV_MOD_SHIFT;
+    int dest_shorthand = (icr & APIC_ICR_DEST_SHORT) >> APIC_ICR_DEST_SHORT_SHIFT;
+    CPUState *cs;
+
+    if (delivery_mode != APIC_DM_INIT && delivery_mode != APIC_DM_SIPI) {
+        error_report("WHPX: Unexpected APIC exit that is not an INIT or SIPI");
+        return;
+    }
+
+    /* An INIT level de-assert only resynchronizes arbitration IDs. */
+    if (delivery_mode == APIC_DM_INIT && (icr & APIC_ICR_TRIGGER_MOD) &&
+        !(icr & APIC_ICR_LEVEL)) {
+        return;
+    }
+
+    memset(&ipi, 0, sizeof(ipi));
+    ipi.Type = delivery_mode == APIC_DM_INIT ? WHvX64InterruptTypeInit :
+                                               WHvX64InterruptTypeSipi;
+    ipi.DestinationMode = (icr & APIC_ICR_DEST_MOD) ?
+        WHvX64InterruptDestinationModeLogical :
+        WHvX64InterruptDestinationModePhysical;
+    ipi.TriggerMode = (icr & APIC_ICR_TRIGGER_MOD) ?
+        WHvX64InterruptTriggerModeLevel : WHvX64InterruptTriggerModeEdge;
+    ipi.Vector = icr & APIC_VECTOR_MASK;
+
+    if (dest_shorthand == 0) {
+        /* No shorthand: bits 56-63 hold the destination. */
+        ipi.Destination = (icr >> 56) & 0xff;
+        whpx_request_ipi(&ipi);
+        return;
+    }
+
+    /* 1: self, 2: all including self, 3: all excluding self. */
+    ipi.DestinationMode = WHvX64InterruptDestinationModePhysical;
+    CPU_FOREACH(cs) {
+        if ((dest_shorthand == 1 && cs != cpu) ||
+            (dest_shorthand == 3 && cs == cpu)) {
+            continue;
+        }
+        ipi.Destination = X86_CPU(cs)->apic_id;
+        whpx_request_ipi(&ipi);
+    }
+}
+
 static int whpx_vcpu_run(CPUState *cpu)
 {
     HRESULT hr;
     struct whpx_state *whpx = &whpx_global;
     struct whpx_vcpu *vcpu = get_whpx_vcpu(cpu);
+    WhpxCpuStats *st = whpx_stats_cpu(cpu);
+    uint64_t t_start = 0, t_run = 0, t_exit = 0;
+    int stat = WHPX_STAT_OTHER;
     int ret;
 
     whpx_vcpu_process_async_events(cpu);
-    if (cpu->halted) {
+    /* The hypervisor APIC keeps halted vCPUs inside WHvRunVirtualProcessor. */
+    if (cpu->halted && !whpx_apic_in_platform()) {
         cpu->exception_index = EXCP_HLT;
         atomic_set(&cpu->exit_request, false);
         return 0;
@@ -1747,6 +2233,10 @@ static int whpx_vcpu_run(CPUState *cpu)
     cpu_exec_start(cpu);
 
     do {
+        if (st) {
+            t_start = whpx_stats_now();
+        }
+
         if (cpu->vcpu_dirty) {
             whpx_set_registers(cpu);
             cpu->vcpu_dirty = false;
@@ -1758,9 +2248,20 @@ static int whpx_vcpu_run(CPUState *cpu)
             whpx_vcpu_kick(cpu);
         }
 
+        if (st) {
+            t_run = whpx_stats_now();
+            st->pre_ticks += t_run - t_start;
+        }
+
         hr = whp_dispatch.WHvRunVirtualProcessor(
             whpx->partition, cpu->cpu_index,
             &vcpu->exit_ctx, sizeof(vcpu->exit_ctx));
+
+        if (st) {
+            t_exit = whpx_stats_now();
+            st->run_ticks += t_exit - t_run;
+            stat = whpx_stats_classify(st, vcpu);
+        }
 
         if (FAILED(hr)) {
             whpx_fatal_log("FATAL: WHvRunVirtualProcessor FAILED hr=%08lx"
@@ -1784,11 +2285,36 @@ static int whpx_vcpu_run(CPUState *cpu)
             break;
 
         case WHvRunVpExitReasonX64InterruptWindow:
+            vcpu->ready_for_pic_interrupt = true;
             vcpu->window_registered = 0;
             ret = 0;
             break;
 
+        case WHvRunVpExitReasonX64ApicEoi:
+            /* EOI of a level-triggered interrupt from the IOAPIC. */
+            assert(whpx_apic_in_platform());
+            qemu_mutex_lock_iothread();
+            ioapic_eoi_broadcast(vcpu->exit_ctx.ApicEoi.InterruptVector);
+            qemu_mutex_unlock_iothread();
+            ret = 0;
+            break;
+
+        case WHvRunVpExitReasonX64ApicInitSipiTrap:
+            assert(whpx_apic_in_platform());
+            whpx_handle_init_sipi(cpu, vcpu->exit_ctx.ApicInitSipi.ApicIcr);
+            ret = 0;
+            break;
+
         case WHvRunVpExitReasonX64Halt:
+            if (whpx_apic_in_platform()) {
+                /*
+                 * Interrupts arrive in the hypervisor APIC, so let the
+                 * hypervisor wait for them.
+                 */
+                whpx_set_activity_state(cpu, false, true);
+                ret = 0;
+                break;
+            }
             ret = whpx_handle_halt(cpu);
             break;
 
@@ -1848,6 +2374,11 @@ static int whpx_vcpu_run(CPUState *cpu)
                     rcx =
                         vcpu->exit_ctx.CpuidAccess.DefaultResultRcx |
                         CPUID_EXT_HYPERVISOR;
+
+                    /* The hypervisor APIC is set up in xAPIC mode. */
+                    if (whpx_apic_in_platform()) {
+                        rcx &= ~(UINT64)CPUID_EXT_X2APIC;
+                    }
 
                     /*
                      * Kemu Stage-1: only advertise XSAVE/AVX/FMA when the
@@ -2006,6 +2537,10 @@ static int whpx_vcpu_run(CPUState *cpu)
             break;
         }
 
+        if (st) {
+            st->count[stat]++;
+            st->ticks[stat] += whpx_stats_now() - t_exit;
+        }
     } while (!ret);
 
     cpu_exec_end(cpu);
@@ -2203,6 +2738,11 @@ void whpx_destroy_vcpu(CPUState *cpu)
 void whpx_vcpu_kick(CPUState *cpu)
 {
     struct whpx_state *whpx = &whpx_global;
+    WhpxCpuStats *st = whpx_stats_cpu(cpu);
+
+    if (st) {
+        atomic_inc(&st->count[WHPX_STAT_KICK]);
+    }
     whp_dispatch.WHvCancelRunVirtualProcessor(whpx->partition, cpu->cpu_index, 0);
 }
 
@@ -2584,6 +3124,57 @@ static void whpx_disable_xsave(struct whpx_state *whpx)
     whpx_xsave_cap.AsUINT64 = 0;
 }
 
+/*
+ * KEMU: Let the hypervisor emulate the local APICs, so that interrupt
+ * delivery, EOIs, IPIs and the APIC timer stay out of user mode.
+ * KEMU_WHPX_APIC=user selects the user-mode APIC instead, which is also
+ * used when the host does not support the hypervisor APIC.
+ */
+static void whpx_setup_platform_apic(struct whpx_state *whpx)
+{
+    const char *mode_env = getenv("KEMU_WHPX_APIC");
+    WHV_X64_LOCAL_APIC_EMULATION_MODE mode = WHvX64LocalApicEmulationModeXApic;
+    WHV_CAPABILITY features, exits;
+    UINT32 size;
+    HRESULT hr;
+
+    whpx->apic_in_platform = false;
+    if (mode_env && !strcmp(mode_env, "user")) {
+        fprintf(stderr, "WHPX: using the user-mode APIC\n");
+        return;
+    }
+
+    memset(&features, 0, sizeof(features));
+    memset(&exits, 0, sizeof(exits));
+    whp_dispatch.WHvGetCapability(WHvCapabilityCodeFeatures, &features,
+                                  sizeof(features), &size);
+    whp_dispatch.WHvGetCapability(WHvCapabilityCodeExtendedVmExits, &exits,
+                                  sizeof(exits), &size);
+    if (!features.Features.LocalApicEmulation ||
+        !exits.ExtendedVmExits.X64ApicInitSipiExitTrap ||
+        !whp_dispatch.WHvRequestInterrupt ||
+        !((whp_dispatch.WHvGetVirtualProcessorState &&
+           whp_dispatch.WHvSetVirtualProcessorState) ||
+          (whp_dispatch.WHvGetVirtualProcessorInterruptControllerState2 &&
+           whp_dispatch.WHvSetVirtualProcessorInterruptControllerState2))) {
+        warn_report("WHPX: hypervisor APIC not supported, using the"
+                    " user-mode APIC");
+        return;
+    }
+
+    hr = whp_dispatch.WHvSetPartitionProperty(
+        whpx->partition, WHvPartitionPropertyCodeLocalApicEmulationMode,
+        &mode, sizeof(mode));
+    if (FAILED(hr)) {
+        warn_report("WHPX: Failed to enable the hypervisor APIC, hr=%08lx;"
+                    " using the user-mode APIC", hr);
+        return;
+    }
+
+    whpx->apic_in_platform = true;
+    fprintf(stderr, "WHPX: using the hypervisor APIC\n");
+}
+
 static int whpx_accel_init(MachineState *ms)
 {
     struct whpx_state *whpx;
@@ -2664,9 +3255,14 @@ static int whpx_accel_init(MachineState *ms)
         goto error;
     }
 
+    whpx_setup_platform_apic(whpx);
+
     memset(&prop, 0, sizeof(WHV_PARTITION_PROPERTY));
     prop.ExtendedVmExits.X64MsrExit = 1;
     prop.ExtendedVmExits.X64CpuidExit = 1;
+    if (whpx->apic_in_platform) {
+        prop.ExtendedVmExits.X64ApicInitSipiExitTrap = 1;
+    }
     hr = whp_dispatch.WHvSetPartitionProperty(
         whpx->partition,
         WHvPartitionPropertyCodeExtendedVmExits,
@@ -2710,6 +3306,7 @@ static int whpx_accel_init(MachineState *ms)
     }
 
     whpx_memory_init();
+    whpx_stats_init();
 
     cpu_interrupt_handler = whpx_handle_interrupt;
 

@@ -46,7 +46,8 @@ typedef int WINBOOL;
  * KEMU: Supplemental functions.  The XSAVE state APIs differ between
  * Windows versions (Windows 10 legacy vs Windows 11 modern) and the
  * partition time API may be absent on older builds, so they are loaded
- * optionally.
+ * optionally.  The interrupt APIs are only needed for the hypervisor
+ * APIC; without them the user-mode APIC is used.
  */
 #define LIST_WINHVPLATFORM_FUNCTIONS_SUPPLEMENTAL(X) \
   X(HRESULT, WHvRegisterPartitionDoorbellEvent, \
@@ -71,6 +72,16 @@ typedef int WINBOOL;
         UINT32 BufferSizeInBytes)) \
   X(HRESULT, WHvSuspendPartitionTime, \
         (WHV_PARTITION_HANDLE Partition)) \
+  X(HRESULT, WHvRequestInterrupt, \
+        (WHV_PARTITION_HANDLE Partition, \
+        const WHV_INTERRUPT_CONTROL *Interrupt, \
+        UINT32 InterruptControlSize)) \
+  X(HRESULT, WHvGetVirtualProcessorInterruptControllerState2, \
+        (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, PVOID State, \
+        UINT32 StateSize, UINT32 *WrittenSize)) \
+  X(HRESULT, WHvSetVirtualProcessorInterruptControllerState2, \
+        (WHV_PARTITION_HANDLE Partition, UINT32 VpIndex, const VOID *State, \
+        UINT32 StateSize)) \
 
 #define LIST_WINHVEMULATION_FUNCTIONS(X) \
   X(HRESULT, WHvEmulatorCreateEmulator, (const WHV_EMULATOR_CALLBACKS* Callbacks, WHV_EMULATOR_HANDLE* Emulator)) \

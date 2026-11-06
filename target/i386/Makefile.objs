@@ -20,4 +20,4 @@ obj-y += hvf-utils/x86hvf.o
 endif
 obj-$(call lnot,$(CONFIG_SEV)) += sev-stub.o
 obj-$(CONFIG_AEHD) += aehd-all.o aehd.o
-obj-$(CONFIG_WHPX) += whpx-all.o
+obj-$(CONFIG_WHPX) += whpx-all.o whpx-apic.o
