@@ -1050,7 +1050,9 @@ if(NOT OPTION_AEMU_LIBS_ONLY)
     list(FILTER kemu_win32_test_sources EXCLUDE
          REGEX "(qemu-img|block/file-win32|block/win32-aio)\\.c$")
     android_add_test(TARGET kemu-win32-block-tests
-                     SRC tests/test-win32-block.c ${kemu_win32_test_sources}
+                     SRC tests/test-win32-block.c hw/block/block.c
+                         hw/block/hd-geometry.c
+                         ${kemu_win32_test_sources}
                      DEPS libqemu2-util libqemustub android-qemu-deps android-emu)
     set_source_files_properties(tests/test-win32-block.c PROPERTIES
                                 INCLUDE_DIRECTORIES "${ANDROID_AUTOGEN}/block")

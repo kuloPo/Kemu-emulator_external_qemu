@@ -5,12 +5,17 @@ device. Userdata uses ext4 with Android encryption enabled.
 `system-img/userdata.img` remains the initialization template.
 
 On Windows, userdata uses native asynchronous, unbuffered write-through I/O.
-Completed writes persist their data before the guest receives completion. For
-regular NTFS files, this also persists the metadata needed to retrieve the data,
-so subsequent flushes do not issue a redundant device-wide cache flush. Opening
-and resizing the file still perform a full flush. Other filesystems keep explicit
-flushes. This mode does not disable guest `fsync` durability or delay completion
-until a periodic background flush.
+The file is opened with `cache=none,aio=native,file.write-through=on`. For regular
+NTFS files, the backend confirms that each completed write persists both data and
+the metadata needed to retrieve it. The device's automatic cache policy then
+reports write-through caching to Android, avoiding redundant guest flush requests.
+Native FUA support also avoids emulated flushes in the block layer. Opening and
+resizing the file still perform a full flush.
+
+On other filesystems, or if the durability check fails, the device retains
+writeback reporting. Ordinary writes do not gain an extra flush; explicit guest
+flushes and FUA requests still flush the backing file. This mode preserves guest
+`fsync` durability and does not defer it to a periodic background flush.
 
 New Kemu instances default to `128G` (128 GiB). Existing configured capacities
 are preserved. Creating a sparse data image does not require free host space

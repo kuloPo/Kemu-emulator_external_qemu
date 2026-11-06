@@ -57,6 +57,7 @@ bool blkconf_apply_backend_options(BlockConf *conf, bool readonly,
 {
     BlockBackend *blk = conf->blk;
     BlockdevOnError rerror, werror;
+    BlockDriverInfo bdi;
     uint64_t perm, shared_perm;
     bool wce;
     int ret;
@@ -83,7 +84,12 @@ bool blkconf_apply_backend_options(BlockConf *conf, bool readonly,
     switch (conf->wce) {
     case ON_OFF_AUTO_ON:    wce = true; break;
     case ON_OFF_AUTO_OFF:   wce = false; break;
-    case ON_OFF_AUTO_AUTO:  wce = blk_enable_write_cache(blk); break;
+    case ON_OFF_AUTO_AUTO:
+        wce = blk_enable_write_cache(blk);
+        if (bdrv_get_info(blk_bs(blk), &bdi) == 0 && bdi.write_through) {
+            wce = false;
+        }
+        break;
     default:
         abort();
     }

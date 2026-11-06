@@ -5,6 +5,8 @@
 #include "block/win32-file.h"
 #include "qapi/error.h"
 #include "qapi/qmp/qdict.h"
+#include "hw/block/block.h"
+#include "sysemu/block-backend.h"
 
 static DWORD write_error;
 static unsigned int expected_alignment;
@@ -14,6 +16,37 @@ static OVERLAPPED *packets[2];
 static DWORD packet_errors[2];
 static unsigned int packet_index;
 static bool mock_queue;
+static int filesystem_mode;
+static volatile LONG flush_calls;
+static DWORD flush_error;
+static unsigned int flush_to_disk_calls;
+
+static BOOL WINAPI test_volume_information(HANDLE file, WCHAR *volume,
+    DWORD volume_size, DWORD *serial, DWORD *component_size, DWORD *flags,
+    WCHAR *filesystem, DWORD filesystem_size)
+{
+    if (!filesystem_mode) {
+        return GetVolumeInformationByHandleW(file, volume, volume_size, serial,
+            component_size, flags, filesystem, filesystem_size);
+    }
+    if (filesystem_mode == 3) {
+        SetLastError(ERROR_NOT_SUPPORTED);
+        return FALSE;
+    }
+    g_assert_cmpuint(filesystem_size, >=, 5);
+    wcscpy(filesystem, filesystem_mode == 1 ? L"NTFS" : L"ReFS");
+    return TRUE;
+}
+
+static BOOL WINAPI test_flush_file(HANDLE file)
+{
+    InterlockedIncrement(&flush_calls);
+    if (flush_error) {
+        SetLastError(flush_error);
+        return FALSE;
+    }
+    return FlushFileBuffers(file);
+}
 
 static BOOL WINAPI test_write_file(HANDLE file, const void *buffer, DWORD bytes,
                                   DWORD *transferred, OVERLAPPED *ov)
@@ -74,11 +107,21 @@ static BOOL WINAPI test_file_information(HANDLE file,
 #define WriteFile test_write_file
 #define GetQueuedCompletionStatus test_get_completion
 #define GetFileInformationByHandleEx test_file_information
+#define GetVolumeInformationByHandleW test_volume_information
+#define FlushFileBuffers test_flush_file
 #include "../block/win32-aio.c"
 #include "../block/file-win32.c"
 #undef WriteFile
 #undef GetQueuedCompletionStatus
 #undef GetFileInformationByHandleEx
+#undef GetVolumeInformationByHandleW
+#undef FlushFileBuffers
+
+static int coroutine_fn counted_flush_to_disk(BlockDriverState *bs)
+{
+    flush_to_disk_calls++;
+    return raw_co_flush_to_disk(bs);
+}
 
 typedef struct Completion {
     int calls;
@@ -282,10 +325,102 @@ static void test_file_alignment(void)
     g_assert_cmpuint(bs.bl.opt_mem_alignment, >=, bs.bl.min_mem_alignment);
 }
 
+static void test_write_through_backend(gconstpointer opaque)
+{
+    bool durable = GPOINTER_TO_INT(opaque) == 1;
+    BlockBackend *blk;
+    BlockConf conf = {0};
+    BlockDriverInfo info;
+    QDict *options = qdict_new();
+    char *path = NULL;
+    int fd = g_file_open_tmp("kemu-write-through-XXXXXX", &path, NULL);
+    void *buffer;
+    LONG before;
+    unsigned int before_flush_to_disk;
+    int i;
+
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(_chsize_s(fd, 16384), ==, 0);
+    _close(fd);
+    filesystem_mode = GPOINTER_TO_INT(opaque) == 4 ? 1 : GPOINTER_TO_INT(opaque);
+    flush_calls = 0;
+    qdict_put_str(options, "driver", "raw");
+    qdict_put_str(options, "file.driver", "file");
+    qdict_put_str(options, "file.aio", "native");
+    qdict_put_bool(options, "file.write-through", GPOINTER_TO_INT(opaque) != 4);
+    blk = blk_new_open(path, NULL, options, BDRV_O_RDWR | BDRV_O_NOCACHE,
+                       &error_abort);
+    g_assert_nonnull(blk);
+    bdrv_file.bdrv_co_flush_to_disk = counted_flush_to_disk;
+    g_assert_cmpint(flush_calls, ==, durable ? 1 : 0);
+    g_assert_cmpint(bdrv_get_info(blk_bs(blk), &info), ==, 0);
+    g_assert_cmpint(info.write_through, ==, durable);
+    g_assert_cmpuint(blk_bs(blk)->supported_write_flags & BDRV_REQ_FUA,
+                     ==, durable ? BDRV_REQ_FUA : 0);
+
+    conf.blk = blk;
+    conf.wce = ON_OFF_AUTO_AUTO;
+    conf.rerror = conf.werror = BLOCKDEV_ON_ERROR_AUTO;
+    g_assert_true(blkconf_apply_backend_options(&conf, false, true, &error_abort));
+    g_assert_cmpint(blk_enable_write_cache(blk), ==, !durable);
+    buffer = qemu_blockalign(blk_bs(blk), 4096);
+    memset(buffer, 0xa7, 4096);
+
+    /* Ordinary writes must not cause flushes in either cache policy. */
+    before = flush_calls;
+    before_flush_to_disk = flush_to_disk_calls;
+    for (i = 0; i < 3; i++) {
+        g_assert_cmpint(blk_pwrite(blk, i * 4096, buffer, 4096, 0), ==, 4096);
+    }
+    g_assert_cmpint(flush_calls, ==, before);
+    g_assert_cmpuint(flush_to_disk_calls, ==, before_flush_to_disk);
+    g_assert_cmpint(blk_flush(blk), ==, 0);
+    g_assert_cmpint(flush_calls, ==, before + !durable);
+
+    /* Native FUA bypasses emulation; fallback FUA still flushes. */
+    before = flush_calls;
+    before_flush_to_disk = flush_to_disk_calls;
+    g_assert_cmpint(blk_pwrite(blk, 0, buffer, 4096, BDRV_REQ_FUA), ==, 4096);
+    g_assert_cmpint(flush_calls, ==, before + !durable);
+    g_assert_cmpuint(flush_to_disk_calls, ==, before_flush_to_disk + !durable);
+
+    /* Explicit device cache settings take precedence over detection. */
+    conf.wce = ON_OFF_AUTO_ON;
+    g_assert_true(blkconf_apply_backend_options(&conf, false, true, &error_abort));
+    g_assert_true(blk_enable_write_cache(blk));
+    conf.wce = ON_OFF_AUTO_OFF;
+    g_assert_true(blkconf_apply_backend_options(&conf, false, true, &error_abort));
+    g_assert_false(blk_enable_write_cache(blk));
+    before = flush_calls;
+    g_assert_cmpint(blk_pwrite(blk, 0, buffer, 4096, 0), ==, 4096);
+    g_assert_cmpint(flush_calls, ==, before + !durable);
+
+    /* Failed writes do not become successful FUA completions. */
+    before = flush_calls;
+    write_error = ERROR_DISK_FULL;
+    g_assert_cmpint(blk_pwrite(blk, 0, buffer, 4096, BDRV_REQ_FUA), ==, -ENOSPC);
+    write_error = 0;
+    g_assert_cmpint(flush_calls, ==, before);
+    if (!durable) {
+        flush_error = ERROR_ACCESS_DENIED;
+        g_assert_cmpint(blk_pwrite(blk, 0, buffer, 4096, BDRV_REQ_FUA), ==, -EIO);
+        flush_error = 0;
+    }
+
+    qemu_vfree(buffer);
+    blk_unref(blk);
+    bdrv_file.bdrv_co_flush_to_disk = raw_co_flush_to_disk;
+    filesystem_mode = 0;
+    g_assert_cmpint(unlink(path), ==, 0);
+    g_free(path);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     qemu_init_main_loop(&error_abort);
+    module_call_init(MODULE_INIT_QOM);
+    bdrv_init();
     g_test_add_func("/win32-block/failed-completion", test_failed_completion);
     g_test_add_func("/win32-block/short-read", test_short_read);
     g_test_add_func("/win32-block/submit-disk-full", test_submit_disk_full);
@@ -293,5 +428,13 @@ int main(int argc, char **argv)
     g_test_add_func("/win32-block/alignment", test_alignment);
     g_test_add_func("/win32-block/host-device-option", test_host_device_option);
     g_test_add_func("/win32-block/file-alignment", test_file_alignment);
+    g_test_add_data_func("/win32-block/write-through/ntfs", GINT_TO_POINTER(1),
+                         test_write_through_backend);
+    g_test_add_data_func("/win32-block/write-through/other-filesystem",
+                         GINT_TO_POINTER(2), test_write_through_backend);
+    g_test_add_data_func("/win32-block/write-through/query-failure",
+                         GINT_TO_POINTER(3), test_write_through_backend);
+    g_test_add_data_func("/win32-block/write-through/disabled", GINT_TO_POINTER(4),
+                         test_write_through_backend);
     return g_test_run();
 }

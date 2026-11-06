@@ -453,6 +453,7 @@ static int raw_open(BlockDriverState *bs, QDict *options, int flags,
             goto fail;
         }
         s->durable_writes = true;
+        bs->supported_write_flags = BDRV_REQ_FUA;
     }
 
     if (use_aio) {
@@ -522,6 +523,14 @@ static BlockAIOCB *raw_aio_flush(BlockDriverState *bs,
 {
     BDRVRawState *s = bs->opaque;
     return paio_submit(bs, s->hfile, 0, NULL, 0, cb, opaque, QEMU_AIO_FLUSH);
+}
+
+static int raw_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+{
+    BDRVRawState *s = bs->opaque;
+
+    bdi->write_through = s->durable_writes;
+    return 0;
 }
 
 static int coroutine_fn raw_co_flush_to_disk(BlockDriverState *bs)
@@ -742,6 +751,7 @@ BlockDriver bdrv_file = {
     .bdrv_aio_readv     = raw_aio_readv,
     .bdrv_aio_writev    = raw_aio_writev,
     .bdrv_co_flush_to_disk = raw_co_flush_to_disk,
+    .bdrv_get_info      = raw_get_info,
 
     .bdrv_truncate	= raw_truncate,
     .bdrv_getlength	= raw_getlength,

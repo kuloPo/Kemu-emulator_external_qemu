@@ -34,6 +34,8 @@ typedef struct BlockDriverInfo {
      * True if this block driver only supports compressed writes
      */
     bool needs_compressed_writes;
+    /* All completed writes are persistent, even without BDRV_REQ_FUA. */
+    bool write_through;
 } BlockDriverInfo;
 
 typedef struct BlockFragInfo {

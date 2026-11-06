@@ -1000,6 +1000,8 @@ static int coroutine_fn bdrv_driver_pwritev(BlockDriverState *bs,
             qemu_coroutine_yield();
             ret = co.ret;
         }
+        /* Legacy AIO drivers can satisfy flags on every write. */
+        flags &= ~bs->supported_write_flags;
     }
 
 emulate_flags:
