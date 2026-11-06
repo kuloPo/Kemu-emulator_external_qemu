@@ -45,6 +45,22 @@ struct VirtIOBlockDataPlane {
     AioContext *ctx;
 };
 
+/*
+ * KEMU: Without an IOThread the requests complete in the main loop with the
+ * global mutex held, so the guest can be notified directly.  Going through
+ * the guest notifier instead costs another main loop iteration per request
+ * when the accelerator has no irqfd (e.g. WHPX).
+ */
+static void virtio_blk_data_plane_notify_vq(VirtIOBlockDataPlane *s,
+                                            VirtQueue *vq)
+{
+    if (s->iothread) {
+        virtio_notify_irqfd(s->vdev, vq);
+    } else {
+        virtio_notify(s->vdev, vq);
+    }
+}
+
 /* Raise an interrupt to signal guest, if necessary */
 void virtio_blk_data_plane_notify(VirtIOBlockDataPlane *s, VirtQueue *vq)
 {
@@ -52,7 +68,7 @@ void virtio_blk_data_plane_notify(VirtIOBlockDataPlane *s, VirtQueue *vq)
         set_bit(virtio_get_queue_index(vq), s->batch_notify_vqs);
         qemu_bh_schedule(s->bh);
     } else {
-        virtio_notify_irqfd(s->vdev, vq);
+        virtio_blk_data_plane_notify_vq(s, vq);
     }
 }
 
@@ -73,7 +89,7 @@ static void notify_guest_bh(void *opaque)
             unsigned i = j + ctzl(bits);
             VirtQueue *vq = virtio_get_queue(s->vdev, i);
 
-            virtio_notify_irqfd(s->vdev, vq);
+            virtio_blk_data_plane_notify_vq(s, vq);
 
             bits &= bits - 1; /* clear right-most bit */
         }
