@@ -1,6 +1,10 @@
 android_add_library(
   TARGET netsim-wifi-connection
-  LICENSE GPL-2.0-only
+  LICENSE GPL-2.0-or-later
+  LIBNAME Kemu
+  URL "https://github.com/kuloPo/Kemu-emulator_external_qemu/blob/kemu/main"
+  REPO "${ANDROID_QEMU2_TOP_DIR}"
+  NOTICE "REPO/kemu-qt/LICENSE"
   SRC NetsimWifiConnection.cpp)
 target_include_directories(netsim-wifi-connection PUBLIC ${ANDROID_QEMU2_TOP_DIR})
 target_link_libraries(netsim-wifi-connection

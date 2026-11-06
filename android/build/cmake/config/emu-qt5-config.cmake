@@ -15,6 +15,14 @@ set(QT_VERSION_PATCH 3)
 set(QT_LIB_VERSION ${QT_VERSION_MAJOR}.${QT_VERSION_MINOR}.${QT_VERSION_PATCH})
 set(QT_LIBINFIX "AndroidEmu")
 
+set(QT_RUNTIME_SPDX "LGPL-3.0-only")
+set(QT_RUNTIME_LICENSE "${ANDROID_QEMU2_TOP_DIR}/LICENSES/LICENSE.LGPLv3")
+if(WINDOWS_MSVC_X86_64)
+  # Select the existing GPLv2 option for Qt's runtime code in the GPLv2 host.
+  set(QT_RUNTIME_SPDX "GPL-2.0-only")
+  set(QT_RUNTIME_LICENSE "${ANDROID_QEMU2_TOP_DIR}/LICENSES/LICENSE.GPLv2")
+endif()
+
 # TODO: Remove this once we have -no-window working with absolutely no Qt
 # dependencies
 if(NOT QTWEBENGINE AND (LINUX_X86_64 OR DARWIN_X86_64 OR DARWIN_AARCH64))
@@ -111,10 +119,10 @@ function(add_qt_shared_lib target link target_deps)
       TARGET Qt${QT_VERSION_MAJOR}::${target}
       LIBNAME "Qt ${target}"
       URL "https://android.googlesource.com/platform/external/qt5/+/refs/heads/upstream-6.5.3"
-      SPDX "LGPL-3.0-only"
+      SPDX "${QT_RUNTIME_SPDX}"
       LICENSE
         "https://doc.qt.io/qt-6.5/qt${target}-index.html#licenses-and-attributions"
-      LOCAL "${ANDROID_QEMU2_TOP_DIR}/LICENSES/LICENSE.LGPLv3")
+      LOCAL "${QT_RUNTIME_LICENSE}")
     # Update the dependencies
     foreach(dep ${target_deps})
       target_link_libraries(Qt${QT_VERSION_MAJOR}::${target} INTERFACE ${dep})
@@ -487,14 +495,14 @@ android_license(
   TARGET QT5_SHARED_DEPENDENCIES
   LIBNAME "Qt 6"
   URL "https://android.googlesource.com/platform/external/qt5/+/refs/heads/upstream-6.5.3"
-  SPDX "LGPL-3.0-only"
+  SPDX "${QT_RUNTIME_SPDX}"
   LICENSE "https://doc.qt.io/qt-6.5/licensing.html"
-  LOCAL "${ANDROID_QEMU2_TOP_DIR}/LICENSES/LICENSE.LGPLv3")
+  LOCAL "${QT_RUNTIME_LICENSE}")
 
 android_license(
   TARGET QT5_WEBENGINE_SHARED_DEPENDENCIES
   LIBNAME "Qt 6"
   URL "https://android.googlesource.com/platform/external/qt5/+/refs/heads/upstream-6.5.3"
-  SPDX "LGPL-3.0-only"
+  SPDX "${QT_RUNTIME_SPDX}"
   LICENSE "https://doc.qt.io/qt-6.5/licensing.html"
-  LOCAL "${ANDROID_QEMU2_TOP_DIR}/LICENSES/LICENSE.LGPLv3")
+  LOCAL "${QT_RUNTIME_LICENSE}")

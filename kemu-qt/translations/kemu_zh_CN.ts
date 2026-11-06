@@ -4,6 +4,34 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>Licenses and trademarks</source>
+        <translation>开源许可与商标</translation>
+    </message>
+    <message>
+        <source>Open-source licenses</source>
+        <translation>开源许可证</translation>
+    </message>
+    <message>
+        <source>Source code</source>
+        <translation>源代码</translation>
+    </message>
+    <message>
+        <source>Trademarks</source>
+        <translation>商标声明</translation>
+    </message>
+    <message>
+        <source>This notice file is not included in this installation.</source>
+        <translation>当前安装中未包含此声明文件。</translation>
+    </message>
+    <message>
+        <source>Uses %1 under GPL version 2. See Open-source licenses for details.</source>
+        <translation>使用 GPL 第 2 版许可的 %1，详情见“开源许可证”。</translation>
+    </message>
+    <message>
+        <source>Kemu is an independent project, not affiliated with, sponsored by, or endorsed by Google LLC.</source>
+        <translation>Kemu 是独立项目，与 Google LLC 无隶属关系，亦未获得其赞助或背书。</translation>
+    </message>
+    <message>
         <source>About</source>
         <translation>关于</translation>
     </message>

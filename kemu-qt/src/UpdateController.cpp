@@ -2,6 +2,7 @@
 #include "UiFont.h"
 #include "PerformancePage.h"
 #include "UiLanguage.h"
+#include "LegalInfoDialog.h"
 #include "../launcher/StorageConfig.h"
 #include <QApplication>
 #include <QBoxLayout>
@@ -134,17 +135,38 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     github->setObjectName("KemuAboutGitHub"); github->setTextFormat(Qt::RichText);
     github->setTextInteractionFlags(Qt::TextBrowserInteraction); github->setOpenExternalLinks(true);
     aboutColumn->addWidget(github, 0, Qt::AlignHCenter);
+    auto* legalButtons = new QHBoxLayout;
+    auto* licenses = new QPushButton(about); licenses->setObjectName("KemuOpenSourceLicenses");
+    auto* sources = new QPushButton(about); sources->setObjectName("KemuSourceCode");
+    auto* trademarks = new QPushButton(about); trademarks->setObjectName("KemuTrademarks");
+    legalButtons->addStretch(); legalButtons->addWidget(licenses); legalButtons->addWidget(sources);
+    legalButtons->addWidget(trademarks); legalButtons->addStretch(); aboutColumn->addLayout(legalButtons);
+    connect(licenses, &QPushButton::clicked, this, [this] { showLegalInformation(mDialog, qpath(mRoot), 0); });
+    connect(sources, &QPushButton::clicked, this, [this] { showLegalInformation(mDialog, qpath(mRoot), 1); });
+    connect(trademarks, &QPushButton::clicked, this, [this] { showLegalInformation(mDialog, qpath(mRoot), 2); });
+    auto* qtNotice = new QLabel(about); qtNotice->setObjectName("KemuQtNotice");
+    qtNotice->setAlignment(Qt::AlignCenter); qtNotice->setWordWrap(true); aboutColumn->addWidget(qtNotice);
+    auto* androidNotice = new QLabel("Android is a trademark of Google LLC.", about);
+    androidNotice->setAlignment(Qt::AlignCenter); aboutColumn->addWidget(androidNotice);
+    auto* independent = new QLabel(about); independent->setObjectName("KemuIndependentNotice");
+    independent->setAlignment(Qt::AlignCenter); independent->setWordWrap(true); aboutColumn->addWidget(independent);
     aboutColumn->addStretch();
     connect(mDialog, &QDialog::finished, this, [this, performance] {
         if (!mClosing) performance->closed(mDialog, mWindow, qpath(mRoot), !mBusy);
     });
-    auto retranslate = [this, tabs, languageLabel, showFrameRate, performance] {
+    auto retranslate = [this, tabs, languageLabel, showFrameRate, performance, licenses, sources, trademarks, qtNotice, independent] {
         tabs->item(1)->setText(QCoreApplication::translate("Kemu", "Performance"));
         performance->retranslate(); refreshStorage();
         mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings"));
         tabs->item(0)->setText(QCoreApplication::translate("Kemu", "General"));
         tabs->item(2)->setText(QCoreApplication::translate("Kemu", "Updates"));
         tabs->item(3)->setText(QCoreApplication::translate("Kemu", "About"));
+        licenses->setText(QCoreApplication::translate("Kemu", "Open-source licenses"));
+        sources->setText(QCoreApplication::translate("Kemu", "Source code"));
+        trademarks->setText(QCoreApplication::translate("Kemu", "Trademarks"));
+        qtNotice->setText(QCoreApplication::translate("Kemu", "Uses %1 under GPL version 2. See Open-source licenses for details.").arg(QStringLiteral("Qt\u00ae")));
+        independent->setText(QCoreApplication::translate("Kemu", "Kemu is an independent project, not affiliated with, sponsored by, or endorsed by Google LLC."));
+        if (auto* legal = mDialog->findChild<QDialog*>("KemuLegalInformation")) legal->close();
         languageLabel->setText(QCoreApplication::translate("Kemu", "Language"));
         showFrameRate->setText(QCoreApplication::translate("Kemu", "Show frame rate"));
         mAutoUpdate->setText(QCoreApplication::translate("Kemu", "Automatic updates"));

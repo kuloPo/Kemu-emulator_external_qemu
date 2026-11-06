@@ -22,6 +22,7 @@ if(KEMU_LUPDATE_EXECUTABLE)
     add_custom_target(kemu-update-translations
         COMMAND ${KEMU_LUPDATE_EXECUTABLE}
             ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/src/LegalInfoDialog.cpp
             ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
             ${CMAKE_CURRENT_LIST_DIR}/src/UiLanguage.cpp
             ${CMAKE_CURRENT_LIST_DIR}/src/PerformancePage.h
@@ -32,6 +33,7 @@ if(KEMU_LUPDATE_EXECUTABLE)
 endif()
 
 add_subdirectory(rotation-observer)
+add_subdirectory(legal)
 
 # Built as part of the emulator's existing Qt library and QApplication.
 target_sources(aemu-ui-qt PRIVATE
@@ -57,6 +59,14 @@ if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
         TARGET_DIRECTORY aemu-ui-qt PROPERTIES COMPILE_DEFINITIONS KEMU_GUI_TESTS=1)
 endif()
 if(WINDOWS_MSVC_X86_64)
+    # Preserve the upstream Qt UI license while attributing the Kemu additions.
+    add_library(kemu-ui-license INTERFACE)
+    android_license(TARGET kemu-ui-license LIBNAME Kemu
+        URL "https://github.com/kuloPo/Kemu-emulator_external_qemu"
+        SPDX GPL-2.0-or-later
+        LICENSE "https://github.com/kuloPo/Kemu-emulator_external_qemu/blob/kemu/main/kemu-qt/LICENSE"
+        LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
+    target_link_libraries(aemu-ui-qt PRIVATE kemu-ui-license)
     # Windows SDK import libraries; no third-party binary is redistributed.
     android_license(TARGET dwmapi user32 ws2_32 LIBNAME None SPDX None LICENSE None LOCAL None)
     target_link_libraries(aemu-ui-qt PRIVATE dwmapi)
@@ -66,7 +76,10 @@ if(WINDOWS_MSVC_X86_64)
     target_include_directories(Kemu PRIVATE resources)
     target_link_libraries(Kemu PRIVATE user32 ws2_32)
     set_target_properties(Kemu PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
-    android_license(TARGET Kemu LIBNAME Kemu URL None SPDX GPL-2.0-only LICENSE None
+    android_license(TARGET Kemu LIBNAME Kemu
+        URL "https://github.com/kuloPo/Kemu-emulator_external_qemu"
+        SPDX GPL-2.0-or-later
+        LICENSE "https://github.com/kuloPo/Kemu-emulator_external_qemu/blob/kemu/main/kemu-qt/LICENSE"
         LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
     # Use the same install pipeline and destination as emulator.exe.
     android_install_exe(Kemu .)
@@ -108,6 +121,7 @@ if(WINDOWS_MSVC_X86_64)
         ${CMAKE_CURRENT_LIST_DIR}/src/StorageMoveDialog.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.cpp
         ${CMAKE_CURRENT_LIST_DIR}/src/UpdateController.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/LegalInfoDialog.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateCore.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateDownload.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateTransaction.cpp)
@@ -121,7 +135,11 @@ if(WINDOWS_MSVC_X86_64)
     target_include_directories(KemuUpdater PRIVATE ${KEMU_JSON} resources)
     target_link_libraries(KemuUpdater PRIVATE bcrypt user32 shell32 libcmt libcpmt libvcruntime libucrt)
     set_target_properties(KemuUpdater PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
-    android_license(TARGET KemuUpdater LIBNAME Kemu URL None SPDX GPL-2.0-only LICENSE None LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
+    android_license(TARGET KemuUpdater LIBNAME Kemu
+        URL "https://github.com/kuloPo/Kemu-emulator_external_qemu"
+        SPDX GPL-2.0-or-later
+        LICENSE "https://github.com/kuloPo/Kemu-emulator_external_qemu/blob/kemu/main/kemu-qt/LICENSE"
+        LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
     android_install_exe(KemuUpdater .)
     add_executable(kemu-update-tests tests/UpdateTests.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
     target_compile_features(kemu-update-tests PRIVATE cxx_std_17)
@@ -132,7 +150,7 @@ if(WINDOWS_MSVC_X86_64)
 endif()
 
 if(WINDOWS_MSVC_X86_64)
-    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp src/StorageMoveDialog.cpp resources/kemu.qrc update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp src/LegalInfoDialog.cpp src/StorageMoveDialog.cpp resources/kemu.qrc update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
     add_dependencies(kemu-update-ui-tests kemu-translations)
     target_compile_features(kemu-update-ui-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-ui-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

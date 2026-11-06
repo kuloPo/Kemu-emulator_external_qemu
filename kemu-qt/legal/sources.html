@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Source code</title></head>
+<body>
+<h1>Source code</h1>
+<p>Use the version shown in About or VERSION.txt to select the matching release
+in the <a href="https://github.com/kuloPo/Kemu/tree/main/manifests-history">release source manifests</a>.
+Each release contains emulator.xml and aosp.xml recording the source revisions
+used for its host software and Android system.</p>
+<p><a href="https://github.com/kuloPo/Kemu/blob/main/LEGAL.md#source-code">Source download instructions and license information</a><br>
+<a href="https://github.com/kuloPo/Kemu/blob/main/README.md">Build and installation instructions</a></p>
+<ul>
+<li><a href="https://github.com/kuloPo/Kemu-emulator_external_qemu">Kemu UI and emulator / QEMU source</a></li>
+<li><a href="https://github.com/kuloPo/Kemu-kernel">Linux kernel source</a></li>
+<li><a href="https://github.com/kuloPo/Kemu-kernel_common-modules_virtual-device">Virtual device kernel modules</a></li>
+<li><a href="https://github.com/kuloPo/Kemu-AOSP_prebuilts_qemu-kernel">Kernel prebuilts and source provenance</a></li>
+</ul>
+<h2>Qt runtime source</h2>
+<p>This package uses the existing AndroidEmu Qt 6.5.3 prebuilt. Its official
+Windows import was build 11487595. The import record, fixed source references
+and historical build instructions are listed in
+<a href="qt-sources.html">Qt source references and verification status</a>.</p>
+<p>The exact CI source manifest for that build has not yet been verified. These
+source references are not a claim that complete corresponding source has already
+been delivered for the prebuilt.</p>
+<p>For the kernel and modules, use the source revisions recorded for the prebuilt
+commit selected by the release's Android manifest.</p>
+<p>Development builds correspond to their build checkout, including local changes.
+Source for an older release must match that release, rather than a current branch tip.</p>
+<p>If source or build information for a release is missing,
+<a href="https://github.com/kuloPo/Kemu/issues">report the release version and component</a>.</p>
+<p>External source links require an internet connection. The license texts and
+bundled component notices can be read offline.</p>
+<p>Android is a trademark of Google LLC. QEMU is a trademark of Fabrice Bellard.<br>
+Qt is a registered trademark of The Qt Company Ltd. and its subsidiaries.</p>
+</body></html>

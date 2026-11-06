@@ -1,5 +1,5 @@
-// Copyright 2026 The Android Open Source Project
-// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2026 Kemu contributors
+// SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
 #include <chrono>

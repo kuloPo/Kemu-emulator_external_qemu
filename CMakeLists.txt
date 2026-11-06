@@ -919,7 +919,10 @@ if(WINDOWS_MSVC_X86_64)
                    SRC tests/test-win32-write-through.cpp
                    DEPS gmock_main)
   target_include_directories(kemu-write-through-tests PRIVATE include)
-  android_add_library(TARGET kemu-affinity LICENSE "GPL-2.0-only"
+  android_add_library(TARGET kemu-affinity LICENSE "GPL-2.0-or-later"
+                      LIBNAME Kemu
+                      URL "https://github.com/kuloPo/Kemu-emulator_external_qemu/blob/kemu/main"
+                      REPO "${ANDROID_QEMU2_TOP_DIR}" NOTICE "REPO/kemu-qt/LICENSE"
                       SRC util/vcpu-affinity-policy.cpp util/vcpu-affinity-win32.cpp)
   target_include_directories(kemu-affinity PUBLIC include)
   target_link_libraries(kemu-affinity PRIVATE android-emu-base-logging)
@@ -1102,4 +1105,7 @@ file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/target.tag "${ANDROID_TARGET_TAG}")
 
 # Construct licenses for all targets, this should always be the last thing we
 # do.
+if(WINDOWS_MSVC_X86_64)
+  include(kemu-qt/legal/NoticeLicenses.cmake)
+endif()
 finalize_all_licenses()

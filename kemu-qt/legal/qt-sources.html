@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Qt source references</title></head>
+<body>
+<h1>Qt source references and verification status</h1>
+<p>The Windows package uses the existing Qt 6.5.3 AndroidEmu prebuilt. Its Qt
+runtime code uses the GPL-2.0-only alternative already offered by Qt. This choice
+does not change the binaries or replace third-party licenses.</p>
+<h2>Verified prebuilt provenance</h2>
+<ul>
+<li>Prebuilt repository revision: f2d41b8d15c2a628e95c2e755ed92186d03b763c.</li>
+<li>Windows import: <a href="https://android.googlesource.com/platform/prebuilts/android-emulator-build/qt/+/f6a5499b8ca84998868c7c39cc2d3bdab3ac9fbe">f6a5499b8ca84998868c7c39cc2d3bdab3ac9fbe</a>, official build 11487595, February 25, 2024.</li>
+<li>The only change in windows_msvc-x86_64 between the import and the selected prebuilt revision is the addition of BUILD.bazel. The library files are unchanged.</li>
+<li>The installed SDK module metadata records Qt 6.5.3 and MSVC 19.38.33134.0.</li>
+</ul>
+<h2>Source and build references</h2>
+<p>The <a href="https://android.googlesource.com/platform/manifest/+/6bbca619149d419c9dca8384e362cff1955f36c0/default.xml">contemporaneous emu-prebuilts manifest</a>
+selects external/qt5 on upstream-6.5.3. Its fixed source reference is
+<a href="https://android.googlesource.com/platform/external/qt5/+/f4a01d798aad2a5779e4bb19b6299eefc7d18181">f4a01d798aad2a5779e4bb19b6299eefc7d18181</a>.
+The Qt superproject records these module commits:</p>
+<table border="1" cellspacing="0" cellpadding="5">
+<tr><th>Module</th><th>Revision</th></tr>
+<tr><td>qtbase</td><td>372eaedc5b8c771c46acc4c96e91bbade4ca3624</td></tr>
+<tr><td>qtdeclarative</td><td>e00c258fa5a4e122636d441967dea035865fac5d</td></tr>
+<tr><td>qtpositioning</td><td>e6870f020291ea61d011fc7155816865ec0f02e8</td></tr>
+<tr><td>qtsvg</td><td>220cd8c6261552f0fcf47061c64f862adae29b55</td></tr>
+<tr><td>qtimageformats</td><td>4f89d7ef7d4f30c1907915435b432d957b62b7ff</td></tr>
+<tr><td>qtwebchannel</td><td>2daf972a3e451065b7a8f11b98f225761795ab28</td></tr>
+<tr><td>qtwebsockets</td><td>625524eb7e7518a61c9cfa2ba2eb1cd2673d5cf3</td></tr>
+<tr><td>qtwebengine</td><td>864b08394d1e6d366d7c136ffc50e27adfd08447</td></tr>
+</table>
+<p>That qtwebengine revision pins its Chromium snapshot, qtwebengine-chromium, at
+ef090c47d08c734ae2b3c1db508982aca0f3ee1e.</p>
+<p>The <a href="https://android.googlesource.com/platform/external/qemu/+/2b71197c1fa858b7d3599e5132003bd5a719f774/android/build/python/aemu/prebuilts/qt.py">historical Qt 6.5.3 Python build script</a>
+lists these eight modules and the AndroidEmu library suffix. It initializes the
+Qt submodules, configures a shared release build with the win32-msvc platform,
+and disables PDF, printing, WebRTC and spellchecking. The old build-qt6.sh
+script targeting Qt 6.2.1 is not the 6.5.3 build entry point.</p>
+<p>Retrieve the source superproject at the fixed commit above and initialize its
+submodules using init-repository as described by the historical build script.
+Keep all module and Chromium submodule revisions pinned by that checkout.
+The historical script must be reviewed before execution: it uses C:\qttmp and
+deletes that directory. These are source references, not a new Kemu build step.</p>
+<h2>Third-party notices</h2>
+<p>The <a href="Qt-6.5.3-THIRD-PARTY.txt">Qt third-party notices</a> contain the
+qt_attribution.json entries of the referenced Qt Base, SVG, Image Formats,
+Declarative and Positioning sources for components in the shipped Qt libraries.
+Entries used only on other platforms, by modules that are not shipped or by build
+tools are omitted. Qt WebChannel and Qt WebSockets have no third-party
+attributions. The notices select GPLv2 for FreeType and its rasterizer, CC0 for
+BLAKE2 and MIT for the Vulkan XML specification.</p>
+<p>The <a href="QtWebEngine-6.5.3-Chromium-THIRD-PARTY.txt">Qt WebEngine Chromium notices</a>
+were collected from the pinned qtwebengine-chromium revision using the license file
+rules of its tools/licenses.py. Without the original build directory, they cover
+every third-party directory in the snapshot, including components that may not
+be part of the Windows libraries. See also
+<a href="https://doc.qt.io/qt-6.5/qtwebengine-licensing.html">Qt WebEngine licensing</a>.</p>
+<h2>Outstanding verification</h2>
+<p>The historical manifest and build script are evidence of the build approach,
+but the complete CI manifest for build 11487595 was not available from its public
+artifact listing during this review. Exact build-script revision, local patches
+and all build inputs therefore remain unverified. A branch name or version number
+alone does not establish complete corresponding source.</p>
+<p>The included notices were collected from the referenced sources, not from the
+build output of 11487595. This page does not certify the entire distribution as
+license-compliant.</p>
+<p><a href="sources.html">Source code</a> | <a href="licenses.html">Open-source licenses</a></p>
+</body></html>
