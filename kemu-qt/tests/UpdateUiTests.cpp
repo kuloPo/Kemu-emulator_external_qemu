@@ -25,7 +25,9 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QThread>
 #include <iostream>
+#include <tuple>
 class CloseProbe : public QWidget {
 public:
     int closes = 0;
@@ -123,93 +125,272 @@ static void checkPerformanceLifecycle(const QString& root) {
     }
     qputenv("ANDROID_AVD_HOME",previous);
 }
-static void checkFullInstallerPrompt() {
+static void waitUntil(const std::function<bool()>& done, int timeout = 8000) {
+    QEventLoop wait; QTimer poll, deadline;
+    QObject::connect(&poll, &QTimer::timeout, [&] { if (done()) wait.quit(); });
+    QObject::connect(&deadline, &QTimer::timeout, &wait, &QEventLoop::quit);
+    poll.start(10); deadline.setSingleShot(true); deadline.start(timeout);
+    if (!done()) wait.exec();
+    kemu::update::require(done(), "Update UI did not reach the expected state");
+}
+static void confirmDownload(QWidget& window, bool accept) {
+    waitUntil([&] { return window.findChild<QMessageBox*>("KemuConfirmDownload") != nullptr; });
+    auto* prompt = window.findChild<QMessageBox*>("KemuConfirmDownload");
+    kemu::update::require(prompt->text() == QCoreApplication::translate("Kemu", "Version %1 is available. Download the update now?").arg("v0.10.0"),
+                          "Full and incremental updates must use the same download confirmation");
+    for (auto* button : prompt->buttons()) {
+        if (prompt->buttonRole(button) == (accept ? QMessageBox::AcceptRole : QMessageBox::RejectRole)) {
+            button->click(); break;
+        }
+    }
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
     using namespace kemu::update;
-    enum class Dismiss { Cancel, Stop, DestroyParent };
-    struct Scenario { bool automatic, enabled, cached; Dismiss dismiss; };
-    for (const bool intermediate : {false, true}) {
-        for (const auto scenario : {Scenario{false, false, true, Dismiss::Cancel},
-                                    Scenario{true, true, true, Dismiss::Stop},
-                                    Scenario{true, true, false, Dismiss::DestroyParent},
-                                    Scenario{true, false, true, Dismiss::Stop}}) {
+    for (const bool full : {false, true}) {
+        for (const bool automatic : {false, true}) {
             QTemporaryDir temporary;
-            const fs::path root(temporary.path().toStdWString());
+            const fs::path root(temporary.path().toStdWString()), stage = root/".kemu-update";
             qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
             qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
             writeText(root/"VERSION.txt","v0.1.0\n");
-            Json history = {{"schema_version",1},{"releases",Json::array({
+            const Json history = {{"schema_version",1},{"releases",Json::array({
+                {{"version","v0.10.0"},{"files",{"a.dll"}}},
                 {{"version","v0.1.0"},{"files",Json::array()}},
-                {{"version","v0.2.0"},{"files",{"a.dll"}}}})}};
-            const auto stage = root/".kemu-update";
-            if (scenario.cached) {
-                prepareUpdateTask(root,history);
-                writeText(stage/"payload/a.dll","cached");
-                writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
-                saveDownloadedUpdate(stage,resolve(history,"v0.1.0"));
-            }
-            history["releases"][1]["files"] = Json::array();
-            if (intermediate) history["releases"].push_back({{"version","v0.3.0"},{"files",{"a.dll"}}});
-            kemu::setUiLanguage(scenario.automatic ? "en" : "zh-CN");
-            auto window = std::make_unique<QWidget>();
-            window->setAttribute(Qt::WA_DontShowOnScreen); window->show();
-            auto* controller = new kemu::UpdateController(window.get(),[]{return QString();},[]{return QString();},[&]{return history;});
-            auto* dialog = window->findChild<QDialog*>("KemuSettings");
-            dialog->setAttribute(Qt::WA_DontShowOnScreen);
-            dialog->findChild<QCheckBox*>("KemuAutoUpdate")->setChecked(scenario.enabled);
-            if (!scenario.automatic) controller->showSettings();
-            auto* check = dialog->findChild<QPushButton*>("KemuCheckUpdate");
-            auto* status = dialog->findChild<QLabel*>("KemuUpdateStatus");
-            const auto message = scenario.automatic
-                ? QStringLiteral("A major update is available. Please download the full installer.")
-                : QStringLiteral("\u6709\u91cd\u5927\u66f4\u65b0\uff0c\u8bf7\u524d\u5f80\u4e0b\u8f7d\u5b8c\u6574\u7248\u3002");
-            bool offered = false, correct = false, completed = false, timedOut = false;
-            QPointer<QMessageBox> prompt;
-            QEventLoop wait;
-            QTimer poll, deadline;
-            deadline.setSingleShot(true);
-            QObject::connect(&poll,&QTimer::timeout,[&] {
-                if (auto* box = window->findChild<QMessageBox*>("KemuFullInstallerRequired"); box && box->isVisible()) {
-                    offered = true; prompt = box; completed = check->isEnabled();
-                    correct = box->text() == message && box->buttons().size() == 2 &&
-                        box->parentWidget() == (dialog->isVisible() ? dialog : window.get());
-                    if (!completed || !correct) box->reject();
-                    wait.quit();
-                } else if (check->isEnabled() && status->text() == message) {
-                    completed = true; wait.quit();
+                {{"version","v0.2.0"},{"files",full ? Json::array() : Json::array({"a.dll"})}}
+            })}};
+            const auto name = "Kemu-v0.10.0-Setup-x64.exe";
+            writeText(root/"installer-fixture","installer payload");
+            const Json metadata = {{"tag_name","v0.10.0"},{"draft",false},{"assets",Json::array({{
+                {"name",name},{"browser_download_url",std::string(ReleasesUrl)+"/download/v0.10.0/"+name},
+                {"size",fs::file_size(root/"installer-fixture")},{"digest","sha256:"+sha256(root/"installer-fixture")}}})}};
+            std::vector<std::string> transfers;
+            bool corrupt = false;
+            bool pauseDownload = false;
+            std::atomic<bool> downloading{false};
+            const Download transfer = [&](const std::string& url, const fs::path& output, uint64_t,
+                                         const std::function<bool()>& cancelled, const std::function<void(uint64_t,uint64_t)>& progress) {
+                require(!cancelled(), "Cancelled before download");
+                transfers.push_back(url);
+                if (pauseDownload && url.find("api.github.com") == url.npos) {
+                    writeText(output,"partial"); downloading = true;
+                    while (!cancelled()) QThread::msleep(10);
+                    throw std::runtime_error("Update cancelled");
                 }
-            });
-            QObject::connect(&deadline,&QTimer::timeout,[&] {
-                timedOut = true;
-                for (auto* box : window->findChildren<QMessageBox*>()) box->reject();
-                wait.quit();
-            });
-            poll.start(10); deadline.start(15000);
-            if (!scenario.automatic) check->click();
-            wait.exec(); poll.stop(); deadline.stop();
-            require(!timedOut,"Full installer check did not complete before the deadline");
-            require(completed,"Full installer prompt must not block update completion");
-            require(offered == (!scenario.automatic || scenario.enabled),"Full installer prompt must respect the current automatic update setting");
-            require(!offered || correct,"Full installer prompt must be translated and owned by the visible window");
-            if (scenario.dismiss == Dismiss::DestroyParent) {
-                window.reset();
-                require(prompt.isNull(),"Destroying the window must safely destroy its open update prompt");
-            } else {
-                if (scenario.dismiss == Dismiss::Cancel && prompt) prompt->reject();
-                controller->stop();
-                require(!prompt || !prompt->isVisible(),"Stopping updates must dismiss the full installer prompt");
-                QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
-                require(prompt.isNull(),"Dismissed full installer prompts must be deleted");
+                if (url.find("api.github.com") != url.npos) writeJson(output, metadata);
+                else if (full) writeText(output, corrupt ? "corrupted payload" : "installer payload");
+                else fs::copy_file(fixtures/"good.tar.xz",output,fs::copy_options::overwrite_existing);
+                if (progress) progress(fs::file_size(output),fs::file_size(output));
+            };
+            kemu::setUiLanguage(automatic ? "zh-CN" : "en");
+            QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",automatic);
+            auto window = std::make_unique<QWidget>();
+            auto* controller = new kemu::UpdateController(window.get(),[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+            auto* dialog = window->findChild<QDialog*>("KemuSettings"); dialog->setAttribute(Qt::WA_DontShowOnScreen);
+            auto* button = dialog->findChild<QPushButton*>("KemuCheckUpdate");
+            if (automatic) {
+                waitUntil([&] { return dialog->isVisible() && button->isEnabled(); });
+                require(transfers.empty() && !window->findChild<QMessageBox*>(), "Startup must show updates without downloading or opening a prompt");
+                require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->currentRow()==2, "Startup must select the Updates page");
             }
-            require(readVersion(root)=="v0.1.0" && !fs::exists(root/".kemu-update-pending") &&
-                    !fs::exists(stage/"job.json") && !fs::exists(root/".kemu-update-history.tmp"),
-                    "Full installer check must not prepare an installation or leave downloaded history");
+            button->click();
+            confirmDownload(*window, false);
+            require(transfers.empty(), "Rejecting the download must not transfer any update packages");
+            require(dialog->findChild<QLabel*>("KemuUpdateStatus")->text() ==
+                    QCoreApplication::translate("Kemu", "Version %1 is available. Click Check for updates to confirm the download.").arg("v0.10.0"),
+                    "Update availability must use a shared message without package counts");
+            button->click();
+            confirmDownload(*window, true);
+            if (!automatic) {
+                // Delay UI completion delivery, then deliver a cancellation click queued at the boundary.
+                int waits = 0;
+                while (!fs::exists(stage/"downloaded.json") && waits++ < 800) QThread::msleep(10);
+                require(fs::exists(stage/"downloaded.json"),"Download did not commit while UI completion was pending");
+                require(QMetaObject::invokeMethod(dialog->findChild<QPushButton*>("KemuCancelUpdate"),"clicked",Qt::DirectConnection),
+                        "Cannot deliver a late cancellation click");
+                require(dialog->findChild<QLabel*>("KemuUpdateStatus")->text() != "Cancelling download...",
+                        "A late cancel click must not replace the completed download state");
+            }
+            waitUntil([&] { return window->findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
+            QPointer<QMessageBox> prompt = window->findChild<QMessageBox*>("KemuUpdateReady");
+            require(prompt->buttons().size()==2 && button->isEnabled(), "Completed download needs Update now and Later");
+            require(prompt->text() == QCoreApplication::translate("Kemu",full
+                ? "The full installer has been downloaded and verified. Updating now will close the emulator and open the installer."
+                : "The update has been downloaded and verified. Updating now will close and restart the emulator."), "Wrong installation prompt");
+            if (full) require(transfers.size()==2 && transfers.back().find(name)!=std::string::npos, "Full update must download only the latest installer");
+            else require(transfers.size()==2 && transfers[0].find("v0.2.0/")!=std::string::npos && transfers[1].find("v0.10.0/")!=std::string::npos,
+                         "Download every incremental package in numeric order, even when its files are overwritten");
+            prompt->reject(); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+            require(prompt.isNull() && fs::exists(stage/"downloaded.json") && !fs::exists(root/".kemu-update-pending"), "Later must retain the verified download");
+            button->click(); waitUntil([&] { return window->findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
+            require(transfers.size()==2, "A verified cached update must not download again");
+            controller->stop(); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+            require(!window->findChild<QMessageBox*>("KemuUpdateReady"), "Stopping must dismiss the installation prompt");
+            window.reset();
+            if (full && !automatic) {
+                for (const int cacheState : {0, 1, 2}) {
+                    if (cacheState == 1) writeText(stage/"downloaded.json", "broken marker");
+                    else fs::remove(stage/"downloaded.json");
+                    if (cacheState == 2) fs::rename(stage/name,stage/(std::string(name)+".part"));
+                    QWidget cacheWindow;
+                    kemu::UpdateController cached(&cacheWindow,[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+                    auto* cachedDialog = cacheWindow.findChild<QDialog*>("KemuSettings");
+                    cachedDialog->setAttribute(Qt::WA_DontShowOnScreen);
+                    const auto before = transfers.size();
+                    cachedDialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
+                    confirmDownload(cacheWindow, true);
+                    waitUntil([&] { return cacheWindow.findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
+                    require(transfers.size() == before + 1 && transfers.back().find("api.github.com") != std::string::npos,
+                            "A complete installer cache, including a .part file, must only re-fetch release metadata");
+                    cached.stop(); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+                }
+                {
+                    fs::remove(stage/"downloaded.json"); fs::create_directory(stage/"downloaded.json.tmp");
+                    QWidget cacheWindow;
+                    kemu::UpdateController cached(&cacheWindow,[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+                    auto* cachedDialog = cacheWindow.findChild<QDialog*>("KemuSettings");
+                    cachedDialog->setAttribute(Qt::WA_DontShowOnScreen);
+                    auto* cachedButton = cachedDialog->findChild<QPushButton*>("KemuCheckUpdate");
+                    const auto before = transfers.size();
+                    cachedButton->click(); confirmDownload(cacheWindow,true);
+                    waitUntil([&] { return cachedButton->isEnabled(); });
+                    require(transfers.size() == before + 1 && !fs::exists(stage/"downloaded.json") && fs::exists(stage/name),
+                            "A ready-record write failure must keep the installer and must not start another download");
+                    require(!cacheWindow.findChild<QMessageBox*>("KemuUpdateReady"),"Failed finalization must not offer installation");
+                    fs::remove(stage/"downloaded.json.tmp"); cached.stop();
+                }
+                writeText(stage/name,"invalid cache");
+                corrupt = true; transfers.clear();
+                QWidget retryWindow;
+                kemu::UpdateController retry(&retryWindow,[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+                auto* retryDialog = retryWindow.findChild<QDialog*>("KemuSettings"); retryDialog->setAttribute(Qt::WA_DontShowOnScreen);
+                auto* retryButton = retryDialog->findChild<QPushButton*>("KemuCheckUpdate");
+                retryButton->click();
+                confirmDownload(retryWindow, true);
+                waitUntil([&] { return retryButton->isEnabled() && retryDialog->isVisible(); });
+                require(!retryWindow.findChild<QMessageBox*>() && !fs::exists(stage/"downloaded.json"), "A corrupt installer must not be offered");
+                corrupt = false; retryButton->click();
+                confirmDownload(retryWindow, true);
+                waitUntil([&] { return retryWindow.findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
+                require(transfers.size()==4 && readJson(stage/"downloaded.json").at("from")=="v0.1.0", "A corrupt full installer must allow retry from a known version");
+                retryWindow.findChild<QMessageBox*>("KemuUpdateReady")->reject();
+                QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
+                writeText(stage/name,"invalid cache"); pauseDownload = true;
+                retryButton->click(); confirmDownload(retryWindow, true); waitUntil([&] { return downloading.load(); });
+                retryDialog->findChild<QPushButton*>("KemuCancelUpdate")->click();
+                waitUntil([&] { return retryButton->isEnabled(); });
+                require(!fs::exists(stage/"downloaded.json") && !retryWindow.findChild<QMessageBox*>(), "Cancelled downloads must not be offered");
+                require(retryDialog->findChild<QLabel*>("KemuUpdateStatus")->text() ==
+                        "Update cancelled. Downloaded files were kept; valid cached files will be reused when you retry.",
+                        "Cancellation must explain that valid cached files can be reused");
+                pauseDownload = false; retryButton->click();
+                confirmDownload(retryWindow, true);
+                waitUntil([&] { return retryWindow.findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
+                require(fs::exists(stage/"downloaded.json"), "Cancelled downloads must allow a clean retry");
+                retry.stop();
+            }
         }
+    }
+    for (const bool enabled : {false, true}) {
+        QTemporaryDir temporary; const fs::path root(temporary.path().toStdWString());
+        qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8()); qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
+        writeText(root/"VERSION.txt","v0.1.0\n"); writeText(root/".kemu-update/cached","old task");
+        writeJson(root/".kemu-update/task.json", {{"full_installer",true},{"to","v0.1.0"}});
+        std::atomic<int> checks{0};
+        QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",enabled);
+        QWidget window;
+        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&] {
+            ++checks;
+            return Json{{"schema_version",1},{"releases",Json::array({{{"version","v0.1.0"},{"files",Json::array()}}})}};
+        });
+        QEventLoop wait; QTimer::singleShot(2300,&wait,&QEventLoop::quit); wait.exec();
+        controller.stop();
+        require(checks==(enabled ? 1 : 0) && !window.findChild<QDialog*>("KemuSettings")->isVisible(), "Disabled checks and up-to-date startup must stay quiet");
+        require(!fs::exists(root/".kemu-update/cached"), "Startup must clean successful full updates even when automatic updates are disabled");
+    }
+}
+static void checkUnknownVersionStartup() {
+    using namespace kemu::update;
+    for (const bool automatic : {false,true}) {
+        for (const std::string state : {"missing","invalid","locked","lost-during-check"}) {
+            QTemporaryDir temporary; const fs::path root(temporary.path().toStdWString()), stage=root/".kemu-update";
+            qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8()); qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
+            if (state!="missing") writeText(root/"VERSION.txt",state=="invalid" ? "unknown" : "v0.1.0\n");
+            writeJson(stage/"task.json",{{"from","v0.1.0"},{"to","v0.2.0"},{"full_installer",false}});
+            writeText(stage/"history.json","cached history"); writeText(stage/"downloaded.json","cached ready marker");
+            writeText(stage/"payload/a.dll","cached payload"); writeText(stage/"v0.2.0.tar.xz","cached archive");
+            std::atomic<int> checks{0};
+            QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",automatic);
+            QWidget window;
+            kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&] {
+                ++checks; fs::remove(root/"VERSION.txt");
+                return Json{{"schema_version",1},{"releases",Json::array({{{"version","v0.3.0"},{"files",Json::array()}}})}};
+            });
+            auto* dialog=window.findChild<QDialog*>("KemuSettings"); dialog->setAttribute(Qt::WA_DontShowOnScreen);
+            if (!automatic) dialog->show();
+            auto* status=dialog->findChild<QLabel*>("KemuUpdateStatus"); const auto previousStatus=status->text();
+            auto snapshot = [&] {
+                std::map<std::string,std::pair<std::string,fs::file_time_type>> result;
+                for (const auto& entry : fs::recursive_directory_iterator(root)) {
+                    if (entry.path()==root/"VERSION.txt") continue;
+                    result.emplace(entry.path().u8string(),std::make_pair(entry.is_regular_file() ? readText(entry.path()) : "<directory>",entry.last_write_time()));
+                }
+                return result;
+            };
+            const auto before=snapshot();
+            HANDLE versionLock=INVALID_HANDLE_VALUE;
+            if (state=="locked") {
+                versionLock=CreateFileW((root/"VERSION.txt").c_str(),GENERIC_READ,0,nullptr,OPEN_EXISTING,0,nullptr);
+                require(versionLock!=INVALID_HANDLE_VALUE,"Cannot lock the UI version fixture");
+            }
+            if (!automatic) dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
+            QEventLoop wait; QTimer::singleShot(automatic ? 2300 : 150,&wait,&QEventLoop::quit); wait.exec();
+            waitUntil([&] { return dialog->findChild<QPushButton*>("KemuCheckUpdate")->isEnabled(); });
+            controller.stop();
+            if (versionLock!=INVALID_HANDLE_VALUE) CloseHandle(versionLock);
+            require(checks==(state=="lost-during-check" ? 1 : 0),"Unknown versions must skip both manual and automatic network checks");
+            require(snapshot()==before,"Unknown versions must preserve all cached files and timestamps without creating temporary files or error logs");
+            require(dialog->isVisible()==!automatic && status->text()==previousStatus && !window.findChild<QMessageBox*>(),
+                    "Unknown versions must not open settings, replace status text or offer downloads");
+        }
+    }
+}
+static void checkUpdateNavigation() {
+    using namespace kemu::update;
+    for (const bool failure : {false,true}) {
+        QTemporaryDir temporary; const fs::path root(temporary.path().toStdWString());
+        qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8()); qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
+        writeText(root/"VERSION.txt","v0.1.0\n"); kemu::setUiLanguage("en");
+        QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",false);
+        QWidget window;
+        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&]() -> Json {
+            if (failure) throw std::runtime_error("Fixture update failure");
+            return {{"schema_version",1},{"releases",Json::array({{{"version","v0.2.0"},{"files",Json::array()}}})}};
+        });
+        auto* dialog=window.findChild<QDialog*>("KemuSettings"); dialog->setAttribute(Qt::WA_DontShowOnScreen);
+        auto* tabs=dialog->findChild<QListWidget*>("KemuSettingsTabs");
+        auto* pages=dialog->findChild<QStackedWidget*>("KemuSettingsPages");
+        auto* updates=dialog->findChild<QWidget*>("KemuUpdatesPage");
+        auto* generalTab=tabs->item(0); auto* updatesTab=tabs->findItems("Updates",Qt::MatchExactly).at(0);
+        tabs->takeItem(tabs->row(updatesTab)); tabs->addItem(updatesTab);
+        pages->removeWidget(updates); pages->insertWidget(0,updates);
+        tabs->setCurrentItem(updatesTab);
+        require(pages->currentWidget()==updates,"Manual navigation must follow the page object after reordering");
+        auto* language=dialog->findChild<QComboBox*>("KemuLanguage"); language->setCurrentIndex(language->findData("zh-CN"));
+        require(updatesTab->text()==QCoreApplication::translate("Kemu","Updates") && generalTab->text()==QCoreApplication::translate("Kemu","General"),
+                "Retranslation must follow navigation items after reordering");
+        tabs->setCurrentItem(generalTab);
+        dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
+        waitUntil([&] { return dialog->isVisible() && dialog->findChild<QPushButton*>("KemuCheckUpdate")->isEnabled(); });
+        require(tabs->currentItem()==updatesTab && pages->currentWidget()==updates,"Update results and errors must select the actual Updates page");
+        controller.stop(); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
     }
 }
 static void checkUpdateFailureVisibility() {
     using namespace kemu::update;
     const auto failure = QStringLiteral("Update could not be completed. Please try again later.\n");
-    for (const auto [automatic, network] : {std::pair{true, true}, std::pair{true, false}, std::pair{false, true}}) {
+    for (const auto [automatic, network, visible] : {std::tuple{true, true, false}, std::tuple{true, false, false},
+                                                    std::tuple{false, true, false}, std::tuple{false, true, true}}) {
         QTemporaryDir temporary;
         const fs::path root(temporary.path().toStdWString());
         qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
@@ -223,6 +404,7 @@ static void checkUpdateFailureVisibility() {
             []() -> Json { throw NetworkError("HTTPS request failed; check your connection"); });
         auto* dialog = window.findChild<QDialog*>("KemuSettings");
         dialog->setAttribute(Qt::WA_DontShowOnScreen);
+        if (visible) { dialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); dialog->show(); }
         auto* status = dialog->findChild<QLabel*>("KemuUpdateStatus");
         QEventLoop wait;
         QTimer poll, deadline;
@@ -233,8 +415,8 @@ static void checkUpdateFailureVisibility() {
         wait.exec(); controller.stop();
         const QString error = network ? "HTTPS request failed; check your connection" : "An unfinished update needs recovery; restart Kemu";
         require(status->text() == failure + error, "Update failure must keep the error in the update status");
-        if (automatic && network) {
-            require(!dialog->isVisible(), "Automatic network failure must not open settings");
+        if (network && !visible) {
+            require(!dialog->isVisible(), "Network failure must not open settings");
         } else {
             require(dialog->isVisible() && dialog->findChild<QListWidget*>("KemuSettingsTabs")->currentRow() == 2,
                     "Update failure that needs attention must open the Updates page");
@@ -292,11 +474,11 @@ int main(int argc, char** argv) {
         } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     }
     if (argc > 1 && QString::fromUtf8(argv[1]) == "major") {
-        try { checkFullInstallerPrompt(); std::cout << "Full installer UI checks passed\n"; return 0; }
+        try { kemu::update::require(argc == 3,"Pass update fixtures directory"); checkDownloadFlow(kemu::update::fs::u8path(argv[2])); std::cout << "Update download and startup UI checks passed\n"; return 0; }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     }
     if (argc > 1 && QString::fromUtf8(argv[1]) == "failure") {
-        try { checkUpdateFailureVisibility(); std::cout << "Update failure UI checks passed\n"; return 0; }
+        try { checkUnknownVersionStartup(); checkUpdateNavigation(); checkUpdateFailureVisibility(); std::cout << "Update failure UI checks passed\n"; return 0; }
         catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     }
     if (argc == 5 && QString::fromUtf8(argv[1]) == "growth") {
@@ -394,8 +576,9 @@ int main(int argc, char** argv) {
     require(QFile::exists(":/kemu/translations/kemu_zh_CN.qm"), "Embedded translation catalog missing");
     const auto translatedSettings = QCoreApplication::translate("Kemu", "Settings");
     require(translatedSettings == QStringLiteral("\u8bbe\u7f6e"), "Qt translator did not load Chinese");
-    require(QCoreApplication::translate("Kemu", "Version %1 is available; %2 files need updating. ")
-        .arg("v0.2.0").arg(3).contains("v0.2.0"), "Translation placeholders were lost");
+    const auto updateNotice = QCoreApplication::translate("Kemu", "Version %1 is available. Download the update now?").arg("v0.2.0");
+    require(updateNotice.contains("v0.2.0") && updateNotice.contains(QStringLiteral("\u65b0\u7248\u672c")),
+        "Update confirmation translation or version placeholder is missing");
     for (int i = 0; i < 3; ++i) {
         kemu::setUiLanguage("en");
         require(QCoreApplication::translate("Kemu", "Settings") == "Settings", "English source fallback failed");
@@ -420,7 +603,6 @@ int main(int argc, char** argv) {
     if (ready) {
         using namespace kemu::update;
         fs::path root(temporary.path().toStdWString()), stage=root/".kemu-update";
-        writeText(stage/"payload/a.dll","new");
         Json history={{"schema_version",1},{"releases",Json::array({
             {{"version","v0.1.0"},{"files",Json::array()}},
             {{"version","v0.2.0"},{"files",{"a.dll"}}}})}};
@@ -454,7 +636,8 @@ int main(int argc, char** argv) {
             require(dialog->findChild<QPushButton*>("KemuCheckUpdate")->isEnabled(),"Check update disabled");
             require(!dialog->findChild<QPushButton*>("KemuInstallUpdate") && !dialog->findChild<QPushButton*>("KemuDownloadUpdate"),"Obsolete buttons remain");
             if (ready) {
-                promptCloser.stop(); require(startupPrompt, "Cached automatic update not offered on next startup");
+                promptCloser.stop(); require(!startupPrompt, "Startup must show the Updates page without prompting");
+                require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->currentRow()==2, "Cached update must open the Updates page");
                 require(!QFile::exists(temporary.filePath(".kemu-update-pending")), "Later choice must not install");
                 for (bool enabled : {false, true}) {
                     initial->setChecked(enabled); bool offered = false;
@@ -466,8 +649,7 @@ int main(int argc, char** argv) {
                     require(offered, "Manual update depends on automatic checkbox");
                 }
             }
-            auto* status=dialog->findChild<QLabel*>("KemuUpdateStatus");
-            if (missing) require(status->text().isEmpty(),"Missing VERSION guidance");
+            dialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(0);
             auto* automatic=dialog->findChild<QCheckBox*>("KemuAutoUpdate");
             require(automatic->text() == QStringLiteral("自动更新"), "Automatic update checkbox was not translated");
             auto* showFrameRate = dialog->findChild<QCheckBox*>("KemuShowFrameRate");
@@ -487,24 +669,6 @@ int main(int argc, char** argv) {
                         "Frame rate option must persist across controller recreation");
             }
             controller.showFrameRateChanged = {};
-            if (missing) {
-                bool prompted = false;
-                QTimer::singleShot(0, [&] {
-                    auto* prompt = dialog->findChild<QMessageBox*>();
-                    prompted = prompt && prompt->text().contains(QStringLiteral("点击确定后前往下载完整安装包"));
-                    if (prompt) {
-                        for (auto* child : prompt->findChildren<QWidget*>()) {
-                            prompted = prompted && child->font().family() == "Microsoft YaHei" &&
-                                (child->font().styleStrategy() & QFont::ForceOutline) &&
-                                (child->font().styleStrategy() & QFont::PreferAntialias);
-                        }
-                        if (argc > 2) prompt->grab().save(QString::fromUtf8(argv[2]) + ".prompt.png");
-                        prompt->reject();
-                    }
-                });
-                dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
-                require(prompted, "Missing version confirmation not shown");
-            }
             automatic->setChecked(true);
             for (auto* widget : dialog->findChildren<QWidget*>()) {
                 const auto font = widget->font();

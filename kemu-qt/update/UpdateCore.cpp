@@ -11,6 +11,16 @@
 
 namespace kemu::update {
 void require(bool ok, const std::string& text) { if (!ok) throw std::runtime_error(text); }
+bool Cancellation::request() {
+    auto expected = State::Active;
+    return mState.compare_exchange_strong(expected, State::Cancelled);
+}
+void Cancellation::beginCommit() {
+    auto expected = State::Active;
+    if (mState.compare_exchange_strong(expected, State::Committing)) return;
+    check();
+    throw std::runtime_error("Update commit already started");
+}
 static std::vector<std::string> split(const std::string& s, char delimiter) {
     std::vector<std::string> result; std::istringstream in(s); std::string item;
     while (std::getline(in, item, delimiter)) result.push_back(item);
@@ -58,6 +68,7 @@ void validatePath(const std::string& value, bool android) {
 }
 void validateHash(const std::string& hash) { require(std::regex_match(hash, std::regex("[0-9a-f]{64}")), "Invalid SHA-256"); }
 Plan resolve(const Json& history, const std::string& current) {
+    if (current.empty()) throw VersionUnavailable();
     validateVersion(current);
     require(history.at("schema_version") == 1 && history.at("releases").is_array(), "Unsupported version history");
     std::vector<Release> releases; std::set<std::string> versions;
@@ -75,10 +86,10 @@ Plan resolve(const Json& history, const std::string& current) {
         }
         releases.push_back(std::move(release));
     }
-    require(found, "Local version is absent from version-history.json; download the full release: " + std::string(ReleasesUrl));
     std::sort(releases.begin(), releases.end(), [](const Release& a, const Release& b) { return compareVersions(a.version, b.version) < 0; });
     Plan plan; plan.current = current; plan.target = current;
     for (const auto& r : releases) if (compareVersions(r.version, plan.target) > 0 && (current.find('-') != current.npos || r.version.find('-') == r.version.npos)) plan.target = r.version;
+    if (!found && plan.target != current) { plan.requiresFullInstaller = true; return plan; }
     for (const auto& r : releases) {
         if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0 && r.files.empty()) {
             plan.requiresFullInstaller = true;
@@ -87,6 +98,7 @@ Plan resolve(const Json& history, const std::string& current) {
     }
     std::map<std::string, std::string> casing;
     for (const auto& r : releases) if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0) {
+        plan.releases.push_back(r);
         for (const auto& path : r.files) {
             auto key = path[0] == '/' ? path : lower(path);
             auto prev = casing.find(key);
@@ -96,32 +108,107 @@ Plan resolve(const Json& history, const std::string& current) {
     }
     return plan;
 }
+Installer selectInstaller(const Json& release, const std::string& version) {
+    validateVersion(version);
+    require(release.at("tag_name") == version && !release.at("draft").get<bool>(), "Installer release does not match the update target");
+    Installer result;
+    const auto name = "Kemu-" + version + "-Setup-x64.exe";
+    for (const auto& asset : release.at("assets")) {
+        if (asset.at("name") != name) continue;
+        require(result.name.empty(), "Duplicate installer asset");
+        result.name = name;
+        result.url = asset.at("browser_download_url").get<std::string>();
+        require(result.url == std::string(ReleasesUrl) + "/download/" + version + "/" + name, "Unexpected installer download URL");
+        auto digest = asset.at("digest").get<std::string>();
+        require(digest.rfind("sha256:", 0) == 0, "Installer SHA-256 is missing");
+        result.hash = digest.substr(7); validateHash(result.hash);
+        result.size = asset.at("size").get<uint64_t>();
+        require(result.size > 0 && result.size <= 16ull*1024*1024*1024, "Invalid installer size");
+    }
+    require(!result.name.empty(), "The latest release has no Windows x64 installer");
+    return result;
+}
+static void validateInstallerFile(const fs::path& stage, const Installer& installer) {
+    safePath(stage, installer.name);
+    const auto file = stage / installer.name;
+    if (!fs::is_regular_file(file) || fs::file_size(file) != installer.size)
+        throw InstallerIntegrityError("Installer size mismatch");
+}
+void validateInstaller(const fs::path& stage, const Installer& installer, const CancelCheck& checkCancelled) {
+    if (checkCancelled) checkCancelled();
+    validateInstallerFile(stage, installer);
+    if (sha256(stage / installer.name, checkCancelled) != installer.hash)
+        throw InstallerIntegrityError("Installer SHA-256 mismatch");
+}
 std::string readText(const fs::path& path, size_t limit) {
     require(fs::is_regular_file(path) && fs::file_size(path) <= limit, "Missing or oversized file: " + path.u8string());
     std::ifstream in(path, std::ios::binary); require(bool(in), "Cannot read: " + path.u8string());
     std::string result((std::istreambuf_iterator<char>(in)), {}); require(!in.bad(), "Read failed"); return result;
 }
 std::string readVersion(const fs::path& root) {
-    std::string v;
-    try { v = readText(root / "VERSION.txt", 256); } catch (...) { throw std::runtime_error("VERSION.txt is missing or unreadable. Download the full release: " + std::string(ReleasesUrl)); }
-    if (v.rfind("\xef\xbb\xbf", 0) == 0) v.erase(0, 3);
-    if (!v.empty() && v.back() == '\n') v.pop_back();
-    if (!v.empty() && v.back() == '\r') v.pop_back();
-    validateVersion(v); return v;
+    try {
+        auto v = readText(root / "VERSION.txt", 256);
+        if (v.rfind("\xef\xbb\xbf", 0) == 0) v.erase(0, 3);
+        if (!v.empty() && v.back() == '\n') v.pop_back();
+        if (!v.empty() && v.back() == '\r') v.pop_back();
+        validateVersion(v); return v;
+    } catch (const std::exception&) { throw VersionUnavailable(); }
 }
-std::string sha256(const fs::path& path) {
+static std::string hashHandle(HANDLE file, const CancelCheck& checkCancelled = {}) {
     BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_HASH_HANDLE hash = nullptr;
     require(BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0, "Cannot open SHA-256");
     struct Cleanup { BCRYPT_ALG_HANDLE a; BCRYPT_HASH_HANDLE& h; ~Cleanup() { if (h) BCryptDestroyHash(h); BCryptCloseAlgorithmProvider(a,0); } } cleanup{alg, hash};
     require(BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) >= 0, "Cannot create SHA-256");
-    std::ifstream in(path, std::ios::binary); require(bool(in), "Cannot hash: " + path.u8string());
-    std::vector<char> data(1024 * 1024);
-    while (in) { in.read(data.data(), data.size()); if (in.gcount()) require(BCryptHashData(hash, reinterpret_cast<PUCHAR>(data.data()), ULONG(in.gcount()), 0) >= 0, "SHA-256 failed"); }
-    require(in.eof(), "Cannot finish reading file");
+    std::vector<unsigned char> data(1024 * 1024);
+    DWORD size = 0;
+    for (;;) {
+        if (checkCancelled) checkCancelled();
+        require(ReadFile(file, data.data(), DWORD(data.size()), &size, nullptr), "Cannot read file for SHA-256");
+        if (!size) break;
+        require(BCryptHashData(hash, data.data(), size, 0) >= 0, "SHA-256 failed");
+    }
     unsigned char digest[32]; require(BCryptFinishHash(hash, digest, 32, 0) >= 0, "SHA-256 failed");
     std::string result; const char* hex = "0123456789abcdef";
     for (auto byte : digest) { result += hex[byte >> 4]; result += hex[byte & 15]; } return result;
 }
+std::string sha256(const fs::path& path, const CancelCheck& checkCancelled) {
+    if (checkCancelled) checkCancelled();
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    require(file != INVALID_HANDLE_VALUE, "Cannot hash: " + path.u8string());
+    struct Close { HANDLE h; ~Close() { CloseHandle(h); } } close{file};
+    return hashHandle(file, checkCancelled);
+}
+LockedInstaller::LockedInstaller(const fs::path& stage, const Installer& installer) {
+    validatePath(installer.name); validateHash(installer.hash);
+    const auto directory = fs::absolute(stage).lexically_normal();
+    try {
+        auto path = directory.root_path();
+        std::vector<fs::path> directories{path};
+        for (const auto& part : directory.relative_path()) { path /= part; directories.push_back(path); }
+        for (const auto& parent : directories) {
+            HANDLE handle = CreateFileW(parent.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            require(handle != INVALID_HANDLE_VALUE, "Cannot lock installer directory: " + parent.u8string());
+            mHandles.push_back(handle);
+            BY_HANDLE_FILE_INFORMATION info{};
+            require(GetFileInformationByHandle(handle, &info) && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "Unsafe installer directory");
+        }
+        HANDLE file = CreateFileW((directory / installer.name).c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        require(file != INVALID_HANDLE_VALUE, "Cannot lock the installer");
+        mHandles.push_back(file);
+        BY_HANDLE_FILE_INFORMATION info{};
+        require(GetFileInformationByHandle(file, &info) && !(info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)),
+                "Unsafe installer file");
+        require(((uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow) == installer.size && hashHandle(file) == installer.hash,
+                "Installer size or SHA-256 mismatch");
+    } catch (...) {
+        for (auto handle : mHandles) CloseHandle(handle);
+        throw;
+    }
+}
+LockedInstaller::~LockedInstaller() { for (auto handle : mHandles) CloseHandle(handle); }
 void writeText(const fs::path& path, const std::string& data) {
     fs::create_directories(path.parent_path()); auto temp = path; temp += L".tmp";
     HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -166,15 +253,42 @@ void clearUpdateDirectory(const fs::path& root, const fs::path& directory) {
         require(!(GetFileAttributesW(item.path().c_str()) & FILE_ATTRIBUTE_REPARSE_POINT), "Unsafe update cache entry");
     fs::remove_all(target);
 }
+bool cleanupInstalledFullUpdate(const fs::path& root, bool runningHelper) {
+    const auto current = readVersion(root);
+    const auto stage = root / ".kemu-update";
+    if (!fs::exists(stage / "task.json") || fs::exists(root / ".kemu-update-pending")) return true;
+    safePath(stage, "task.json");
+    const auto task = readJson(stage / "task.json");
+    if (!task.value("full_installer", false)) return true;
+    if (current != task.at("to").get<std::string>()) return true;
+    HANDLE lock = INVALID_HANDLE_VALUE;
+    if (!runningHelper) {
+        lock = CreateFileW((root / ".kemu-update-lock").c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+            nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (lock == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION) return false;
+        require(lock != INVALID_HANDLE_VALUE, "Cannot lock the update cache for cleanup");
+    }
+    struct Close { HANDLE h; ~Close() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); } } close{lock};
+    if (!runningHelper) { clearUpdateDirectory(root, stage); return true; }
+    // Windows keeps the running helper mapped. The next startup removes it and task.json.
+    for (const auto& entry : fs::directory_iterator(stage)) {
+        const auto name = entry.path().filename().u8string();
+        if (name == "KemuInstallerLauncher.exe" || name == "task.json") continue;
+        safePath(stage, name);
+        if (entry.is_directory()) clearUpdateDirectory(root, entry.path());
+        else fs::remove(entry.path());
+    }
+    return true;
+}
 Plan prepareUpdateTask(const fs::path& root, const Json& history) {
+    const auto current = readVersion(root);
     require(!fs::exists(root / ".kemu-update-pending"), "Recover unfinished installation before checking updates");
-    auto plan = resolve(history, readVersion(root));
-    if (plan.requiresFullInstaller) return plan;
+    auto plan = resolve(history, current);
     auto stage = root / ".kemu-update";
     bool reuse = false;
     if (fs::exists(stage)) {
         safePath(stage, "task.json");
-        try { auto task = readJson(stage / "task.json"); reuse = task.at("from") == plan.current && task.at("to") == plan.target; } catch (...) {}
+        try { auto task = readJson(stage / "task.json"); reuse = task.at("from") == plan.current && task.at("to") == plan.target && task.value("full_installer", false) == plan.requiresFullInstaller; } catch (...) {}
         if (!reuse) clearUpdateDirectory(root, stage);
     }
     fs::create_directories(stage);
@@ -184,33 +298,70 @@ Plan prepareUpdateTask(const fs::path& root, const Json& history) {
         if (state == "rolled_back") fs::remove(stage / "journal.json");
     }
     writeJson(stage / "history.json", history);
-    writeJson(stage / "task.json", {{"from",plan.current},{"to",plan.target}});
+    writeJson(stage / "task.json", {{"from",plan.current},{"to",plan.target},{"full_installer",plan.requiresFullInstaller}});
     fs::remove(root / ".kemu-update-ready");
     return plan;
 }
-void saveDownloadedUpdate(const fs::path& stage, const Plan& plan) {
-    Json files = Json::array();
-    for (const auto& [path, release] : plan.files) {
-        auto relative = path[0] == '/' ? "android" + path : "payload/" + path;
-        safePath(stage, relative);
-        auto packed = path[0] == '/' ? "Android" + path : "Windows/" + path;
-        auto expected = parseChecksums(readText(stage / release.version / "sha256sum.txt")).at(packed);
-        require(sha256(stage / fs::u8path(relative)) == expected, "Downloaded payload changed");
-        files.push_back({{"path", relative}, {"sha256", expected}});
+void saveDownloadedUpdate(const fs::path& stage, const Plan& plan,
+                          const CancelCheck& checkCancelled, const std::function<void()>& beginCommit) {
+    const auto checkVersion = [&] {
+        require(readVersion(stage.parent_path()) == plan.current, "Local version changed; check updates again");
+    };
+    checkVersion();
+    Json record = {{"schema_version",1},{"from",plan.current},{"to",plan.target}};
+    if (plan.requiresFullInstaller) {
+        const auto installer = selectInstaller(readJson(stage / "installer-release.json"), plan.target);
+        fs::path verified;
+        for (const auto* suffix : {"", ".part"}) {
+            auto candidate = installer; candidate.name += suffix;
+            if (!fs::exists(stage / candidate.name)) continue;
+            try { validateInstaller(stage, candidate, checkCancelled); }
+            catch (const InstallerIntegrityError&) { continue; }
+            verified = stage / candidate.name; break;
+        }
+        if (verified.empty()) throw InstallerIntegrityError("Installer size or SHA-256 mismatch");
+        if (checkCancelled) checkCancelled();
+        checkVersion();
+        if (verified != stage / installer.name) {
+            safePath(stage, installer.name);
+            fs::remove(stage / installer.name); fs::rename(verified, stage / installer.name);
+        }
+        record["full_installer"] = true;
+    } else {
+        Json files = Json::array();
+        for (const auto& [path, release] : plan.files) {
+            auto relative = path[0] == '/' ? "android" + path : "payload/" + path;
+            safePath(stage, relative);
+            auto packed = path[0] == '/' ? "Android" + path : "Windows/" + path;
+            auto expected = parseChecksums(readText(stage / release.version / "sha256sum.txt")).at(packed);
+            require(sha256(stage / fs::u8path(relative), checkCancelled) == expected, "Downloaded payload changed");
+            files.push_back({{"path", relative}, {"sha256", expected}});
+        }
+        record["files"] = std::move(files);
     }
-    writeJson(stage / "downloaded.json", {{"schema_version",1}, {"from",plan.current}, {"to",plan.target}, {"files",files}});
+    if (checkCancelled) checkCancelled();
+    checkVersion();
+    if (beginCommit) beginCommit();
+    writeJson(stage / "downloaded.json", record);
 }
-bool loadDownloadedUpdate(const fs::path& root, fs::path& stage, Plan& plan) {
+bool loadDownloadedUpdate(const fs::path& root, fs::path& stage, Plan& plan, FullInstallerCheck installerCheck) {
+    const auto current = readVersion(root);
     auto cached = root / ".kemu-update";
     if (!fs::exists(cached / "downloaded.json")) return false;
     try {
         safePath(cached, "downloaded.json");
         auto record = readJson(cached / "downloaded.json");
-        auto current = readVersion(root);
         require(record.at("schema_version") == 1 && record.at("from") == current, "Stale downloaded update");
         auto selected = resolve(readJson(cached / "history.json"), current);
-        require(!selected.requiresFullInstaller, "This update requires the full installer");
         require(record.at("to") == selected.target && compareVersions(selected.target, current) > 0, "Invalid downloaded target");
+        require(record.value("full_installer", false) == selected.requiresFullInstaller, "Downloaded update type changed");
+        if (selected.requiresFullInstaller) {
+            safePath(cached, "installer-release.json");
+            const auto installer = selectInstaller(readJson(cached / "installer-release.json"), selected.target);
+            if (installerCheck == FullInstallerCheck::Hash) validateInstaller(cached, installer);
+            else validateInstallerFile(cached, installer);
+            stage = cached; plan = std::move(selected); return true;
+        }
         std::map<std::string, std::string> expected;
         for (const auto& [path, release] : selected.files) expected[path[0] == '/' ? "android" + path : "payload/" + path] = {};
         require(record.at("files").is_array() && record.at("files").size() == expected.size(), "Incomplete downloaded update");
@@ -223,6 +374,7 @@ bool loadDownloadedUpdate(const fs::path& root, fs::path& stage, Plan& plan) {
         require(expected.empty(), "Missing downloaded file");
         stage = cached; plan = std::move(selected); return true;
     } catch (...) {
+        readVersion(root);
         fs::remove(cached / "downloaded.json");
         return false;
     }

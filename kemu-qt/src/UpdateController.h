@@ -4,16 +4,16 @@
 #include <QString>
 #include <QStringList>
 #include <QByteArray>
-#include <atomic>
 #include <functional>
 #include <memory>
 #include "../update/UpdateCore.h"
 class QProgressBar; class QCheckBox; class QDialog; class QLabel; class QPushButton; class QThread; class QWidget;
+class QListWidget; class QListWidgetItem; class QStackedWidget;
 namespace kemu {
 class PerformancePage;
 class UpdateController final : public QObject {
 public:
-    UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history = {});
+    UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history = {}, update::Download transfer = {});
     ~UpdateController() override;
     void showSettings();
     void stop();
@@ -22,11 +22,14 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 private:
+    void showUpdatesPage();
     void check(bool automatic = false);
     void offerInstall();
-    void fetch(bool automatic);
+    void offerDownload();
+    void fetch();
     void startup();
     void install();
+    void handoff(bool fullInstaller);
     void status(const QString& text);
     void setVersion(const QString& version);
     bool refreshVersion();
@@ -44,7 +47,11 @@ private:
                           int timeout = 120000, bool cancellable = true);
     QWidget* mWindow;
     QDialog* mDialog;
-    QPointer<QDialog> mFullInstallerPrompt;
+    QListWidget* mSettingsTabs;
+    QListWidgetItem* mUpdatesTab;
+    QStackedWidget* mSettingsPages;
+    QWidget* mUpdatesPage;
+    QPointer<QDialog> mInstallPrompt;
     QLabel* mStatus;
     QLabel* mVersion;
     QLabel* mAboutVersion;
@@ -55,10 +62,11 @@ private:
     PerformancePage* mPerformance;
     std::function<QString()> mAdb, mSerial;
     std::function<update::Json()> mHistory;
+    update::Download mTransfer;
     update::fs::path mRoot, mStage, mAvd;
     update::Plan mPlan;
     QThread* mWorker = nullptr;
-    std::atomic<bool> mCancel{false};
+    update::Cancellation mCancel;
     bool mBusy = false, mDownloaded = false, mClosing = false;
     bool mGrowingStorage = false;
 };

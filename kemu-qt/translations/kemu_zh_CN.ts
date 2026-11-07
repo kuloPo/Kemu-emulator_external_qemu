@@ -36,18 +36,6 @@
         <translation>关于</translation>
     </message>
     <message>
-        <source>Major update available</source>
-        <translation>有重大更新</translation>
-    </message>
-    <message>
-        <source>A major update is available. Please download the full installer.</source>
-        <translation>有重大更新，请前往下载完整版。</translation>
-    </message>
-    <message>
-        <source>Download full installer</source>
-        <translation>下载完整版</translation>
-    </message>
-    <message>
         <source>Show frame rate</source>
         <translation>显示帧率</translation>
     </message>
@@ -86,16 +74,6 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <location filename="../src/UpdateController.cpp" line="88"/>
         <source>Cancelling download...</source>
         <translation>正在取消下载…</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="159"/>
-        <source>Cannot detect current version</source>
-        <translation>无法检测当前版本</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="160"/>
-        <source>Cannot detect the current version. Click OK to download the full installer.</source>
-        <translation>无法检测当前版本，点击确定后前往下载完整安装包。</translation>
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="83"/>
@@ -151,8 +129,8 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="141"/>
-        <source>Download cancelled. You can check for updates again.</source>
-        <translation>下载已取消，可重新检查更新。</translation>
+        <source>Update cancelled. Downloaded files were kept; valid cached files will be reused when you retry.</source>
+        <translation>已取消更新。已下载的文件将保留，重试时会校验并复用有效缓存。</translation>
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="207"/>
@@ -204,24 +182,9 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <translation>静音／取消静音</translation>
     </message>
     <message>
-        <location filename="../src/UpdateController.cpp" line="187"/>
-        <source>New version available</source>
-        <translation>发现新版本</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="190"/>
-        <source>No</source>
-        <translation>否</translation>
-    </message>
-    <message>
         <location filename="../src/WindowChrome.cpp" line="306"/>
         <source>No usable ADB found</source>
         <translation>未找到可用的 ADB</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="161"/>
-        <source>OK</source>
-        <translation>确定</translation>
     </message>
     <message>
         <location filename="../src/WindowChrome.cpp" line="126"/>
@@ -270,11 +233,6 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
 </translation>
     </message>
     <message>
-        <location filename="../src/UpdateController.cpp" line="253"/>
-        <source>Update downloaded. You will be prompted on next startup, or click Check for updates to install now.</source>
-        <translation>更新已下载，下次启动时将询问是否更新，也可点击检查更新立即安装。</translation>
-    </message>
-    <message>
         <location filename="../src/UpdateController.cpp" line="260"/>
         <source>Update now</source>
         <translation>立即更新</translation>
@@ -302,16 +260,6 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <translation>正在更新独立更新器…</translation>
     </message>
     <message>
-        <location filename="../src/UpdateController.cpp" line="188"/>
-        <source>Version %1 is available. Download the update?</source>
-        <translation>发现新版本 %1，是否下载更新？</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="186"/>
-        <source>Version %1 is available; %2 files need updating. </source>
-        <translation>发现新版本 %1，需要更新 %2 个文件。 </translation>
-    </message>
-    <message>
         <location filename="../src/WindowChrome.cpp" line="122"/>
         <source>Volume down</source>
         <translation>音量－</translation>
@@ -320,11 +268,6 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <location filename="../src/WindowChrome.cpp" line="121"/>
         <source>Volume up</source>
         <translation>音量＋</translation>
-    </message>
-    <message>
-        <location filename="../src/UpdateController.cpp" line="189"/>
-        <source>Yes</source>
-        <translation>是</translation>
     </message>
     <message>
         <location filename="../src/UpdateController.cpp" line="185"/>
@@ -509,6 +452,34 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
     <message>
         <source>Disk expansion is in progress. Please wait before closing Kemu.</source>
         <translation>正在扩大磁盘，请等待完成后再关闭 Kemu。</translation>
+    </message>
+    <message>
+        <source>Version %1 is available. Click Check for updates to confirm the download.</source>
+        <translation>发现新版本 %1，点击“检查更新”确认下载。</translation>
+    </message>
+    <message>
+        <source>Downloading and verifying the full installer for %1...</source>
+        <translation>正在下载并校验 %1 的完整安装包…</translation>
+    </message>
+    <message>
+        <source>The full installer has been downloaded and verified. Updating now will close the emulator and open the installer.</source>
+        <translation>完整安装包已下载并通过校验。立即更新将关闭模拟器并打开安装程序。</translation>
+    </message>
+    <message>
+        <source>New version available</source>
+        <translation>发现新版本</translation>
+    </message>
+    <message>
+        <source>Version %1 is available. Download the update now?</source>
+        <translation>发现新版本 %1。是否立即下载更新？</translation>
+    </message>
+    <message>
+        <source>Download</source>
+        <translation>下载</translation>
+    </message>
+    <message>
+        <source>Installer verified. Preparing to open the installer...</source>
+        <translation>安装包已通过校验，正在准备打开安装程序…</translation>
     </message>
 </context>
 <context>

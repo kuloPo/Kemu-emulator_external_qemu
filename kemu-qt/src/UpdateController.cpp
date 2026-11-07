@@ -17,8 +17,6 @@
 #include <QIcon>
 #include <QPainter>
 #include <QStyleOptionButton>
-#include <QDesktopServices>
-#include <QUrl>
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
@@ -52,8 +50,8 @@ static QString rootScript(QString script) {
     script.replace("'", "'\\''");
     return "su 0 sh -c '" + script + "'";
 }
-UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history)
-    : QObject(parent), mWindow(parent), mAdb(std::move(adb)), mSerial(std::move(serial)), mHistory(std::move(history)) {
+UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history, update::Download transfer)
+    : QObject(parent), mWindow(parent), mAdb(std::move(adb)), mSerial(std::move(serial)), mHistory(std::move(history)), mTransfer(transfer ? std::move(transfer) : download) {
     initializeUiTranslations();
     mWindow->installEventFilter(this);
     auto root = qEnvironmentVariable("KEMU_INSTALL_ROOT");
@@ -65,9 +63,17 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     mDialog = new QDialog(parent); mDialog->setObjectName("KemuSettings");
     mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings")); mDialog->resize(800, 590);
     mDialog->setStyleSheet("QWidget {color:#edf1f6;} QDialog {background:#1b2028;} QListWidget {background:#151b24;border:1px solid #293343;border-radius:10px;padding:8px;outline:0;} QListWidget::item {height:42px;padding-left:16px;border-radius:7px;} QListWidget::item:hover {background:#252f3e;} QListWidget::item:selected {background:#29456b;color:#b8d8ff;} QPushButton {padding:9px 18px;border:1px solid #465468;border-radius:7px;background:#29323e;} QPushButton#KemuCheckUpdate {background:#3478cb;border-color:#448fe8;} QPushButton:hover {background:#3b506c;} QPushButton:disabled {color:#75808f;background:#20262f;} QCheckBox {spacing:9px;} QCheckBox::indicator {width:16px;height:16px;border-radius:4px;border:1px solid #75808f;background:#15191f;} QCheckBox::indicator:checked {background:#508ee0;border-color:#9bc5ff;} QProgressBar {border:0;border-radius:5px;background:#101720;text-align:center;min-height:20px;} QProgressBar::chunk {background:#438fe9;border-radius:5px;}");
-    auto* layout = new QHBoxLayout(mDialog); auto* tabs = new QListWidget(mDialog);
-    tabs->setObjectName("KemuSettingsTabs"); layout->setContentsMargins(16,16,16,16); layout->setSpacing(24); tabs->setFixedWidth(150); tabs->setFocusPolicy(Qt::NoFocus); tabs->addItem(QCoreApplication::translate("Kemu", "General")); tabs->addItem(QCoreApplication::translate("Kemu", "Updates")); layout->addWidget(tabs);
-    auto* pages = new QStackedWidget(mDialog); layout->addWidget(pages, 1); auto* general = new QWidget(pages); pages->addWidget(general);
+    auto* layout = new QHBoxLayout(mDialog); auto* tabs = new QListWidget(mDialog); mSettingsTabs = tabs;
+    tabs->setObjectName("KemuSettingsTabs"); layout->setContentsMargins(16,16,16,16); layout->setSpacing(24); tabs->setFixedWidth(150); tabs->setFocusPolicy(Qt::NoFocus); layout->addWidget(tabs);
+    auto* generalTab = new QListWidgetItem(QCoreApplication::translate("Kemu", "General"), tabs);
+    mUpdatesTab = new QListWidgetItem(QCoreApplication::translate("Kemu", "Updates"), tabs);
+    auto* pages = new QStackedWidget(mDialog); mSettingsPages = pages; pages->setObjectName("KemuSettingsPages"); layout->addWidget(pages, 1);
+    auto bindPage = [tabs, pages](QListWidgetItem* tab, QWidget* page) {
+        connect(tabs, &QListWidget::currentItemChanged, page, [pages, tab, page](QListWidgetItem* current) {
+            if (current == tab) pages->setCurrentWidget(page);
+        });
+    };
+    auto* general = new QWidget(pages); pages->addWidget(general); bindPage(generalTab, general);
     auto* generalColumn = new QVBoxLayout(general);
     generalColumn->setSpacing(14);
     auto* languageLabel = new QLabel(general);
@@ -91,8 +97,8 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
             .setValue("general/showFrameRate", on);
         if (showFrameRateChanged) showFrameRateChanged(on);
     });
-    auto* page = new QWidget(pages); pages->addWidget(page);
-    connect(tabs, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex); tabs->setCurrentRow(0);
+    auto* page = new QWidget(pages); mUpdatesPage = page; page->setObjectName("KemuUpdatesPage"); pages->addWidget(page);
+    bindPage(mUpdatesTab, page); tabs->setCurrentItem(generalTab);
     auto* column = new QVBoxLayout(page); column->setSpacing(14);
     mVersion = new QLabel(page); mVersion->setObjectName("KemuCurrentVersion"); column->addWidget(mVersion);
     mStatus = new QLabel(QCoreApplication::translate("Kemu", "Check for updates to get the latest version."), page); mStatus->setObjectName("KemuUpdateStatus"); mStatus->setWordWrap(true); mStatus->setTextFormat(Qt::PlainText); column->addWidget(mStatus);
@@ -109,7 +115,10 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     mProgress = new QProgressBar(page); mProgress->setObjectName("KemuDownloadProgress"); mProgress->hide(); column->addWidget(mProgress);
     mCancelButton = new QPushButton(QCoreApplication::translate("Kemu", "Cancel"), page); mCancelButton->setObjectName("KemuCancelUpdate"); mCancelButton->hide(); column->addWidget(mCancelButton, 0, Qt::AlignLeft); column->addStretch();
     connect(mCheck, &QPushButton::clicked, this, [this] { check(); });
-    connect(mCancelButton, &QPushButton::clicked, this, [this] { mCancel = true; mCancelButton->setEnabled(false); status(QCoreApplication::translate("Kemu", "Cancelling download...")); });
+    connect(mCancelButton, &QPushButton::clicked, this, [this] {
+        mCancelButton->setEnabled(false);
+        if (mCancel.request()) status(QCoreApplication::translate("Kemu", "Cancelling download..."));
+    });
     auto* performance = new PerformancePage(pages); pages->insertWidget(1,performance);
     mPerformance = performance;
     performance->expandStorage = [this] { expandStorage(); };
@@ -117,9 +126,10 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     auto* storageTimer = new QTimer(this); storageTimer->setInterval(2000);
     connect(storageTimer,&QTimer::timeout,this,[this] { if (mDialog->isVisible()) refreshStorage(); });
     storageTimer->start();
-    tabs->insertItem(1,QCoreApplication::translate("Kemu", "Performance"));
+    auto* performanceTab = new QListWidgetItem(QCoreApplication::translate("Kemu", "Performance"));
+    tabs->insertItem(1,performanceTab); bindPage(performanceTab, performance);
     auto* about = new QWidget(pages); about->setObjectName("KemuAbout"); pages->addWidget(about);
-    tabs->addItem(QCoreApplication::translate("Kemu", "About"));
+    auto* aboutTab = new QListWidgetItem(QCoreApplication::translate("Kemu", "About"), tabs); bindPage(aboutTab, about);
     auto* aboutColumn = new QVBoxLayout(about); aboutColumn->setSpacing(16);
     aboutColumn->addStretch();
     auto* logo = new QLabel(about); logo->setObjectName("KemuAboutLogo");
@@ -154,13 +164,13 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
     connect(mDialog, &QDialog::finished, this, [this, performance] {
         if (!mClosing) performance->closed(mDialog, mWindow, qpath(mRoot), !mBusy);
     });
-    auto retranslate = [this, tabs, languageLabel, showFrameRate, performance, licenses, sources, trademarks, qtNotice, independent] {
-        tabs->item(1)->setText(QCoreApplication::translate("Kemu", "Performance"));
+    auto retranslate = [this, generalTab, performanceTab, aboutTab, languageLabel, showFrameRate, performance, licenses, sources, trademarks, qtNotice, independent] {
+        performanceTab->setText(QCoreApplication::translate("Kemu", "Performance"));
         performance->retranslate(); refreshStorage();
         mDialog->setWindowTitle(QCoreApplication::translate("Kemu", "Settings"));
-        tabs->item(0)->setText(QCoreApplication::translate("Kemu", "General"));
-        tabs->item(2)->setText(QCoreApplication::translate("Kemu", "Updates"));
-        tabs->item(3)->setText(QCoreApplication::translate("Kemu", "About"));
+        generalTab->setText(QCoreApplication::translate("Kemu", "General"));
+        mUpdatesTab->setText(QCoreApplication::translate("Kemu", "Updates"));
+        aboutTab->setText(QCoreApplication::translate("Kemu", "About"));
         licenses->setText(QCoreApplication::translate("Kemu", "Open-source licenses"));
         sources->setText(QCoreApplication::translate("Kemu", "Source code"));
         trademarks->setText(QCoreApplication::translate("Kemu", "Trademarks"));
@@ -201,11 +211,16 @@ bool UpdateController::eventFilter(QObject* watched, QEvent* event) {
     return QObject::eventFilter(watched,event);
 }
 void UpdateController::stop() {
-    mClosing = true; mCancel = true;
-    if (mFullInstallerPrompt) mFullInstallerPrompt->close();
+    mClosing = true; mCancel.request();
+    if (mInstallPrompt) mInstallPrompt->close();
     if (mWorker) { mWorker->wait(); delete mWorker; mWorker = nullptr; }
 }
 void UpdateController::showSettings() { mDialog->show(); mDialog->raise(); mDialog->activateWindow(); }
+void UpdateController::showUpdatesPage() {
+    mSettingsTabs->setCurrentItem(mUpdatesTab);
+    mSettingsPages->setCurrentWidget(mUpdatesPage);
+    showSettings();
+}
 void UpdateController::status(const QString& text) {
     if (QThread::currentThread() != thread()) { QMetaObject::invokeMethod(this, [this, text] { if (!mClosing) mStatus->setText(text); }, Qt::QueuedConnection); }
     else mStatus->setText(text);
@@ -347,14 +362,14 @@ void UpdateController::finishStorageGrowth() {
         work([this,adb,serial,request] {
             QElapsedTimer boot; boot.start();
             bool ready = false;
-            while (!mCancel && boot.elapsed() < 180000) {
+            while (!mCancel.requested() && boot.elapsed() < 180000) {
                 try {
                     ready = adbCommand(adb,serial,{"shell","getprop","sys.boot_completed"},5000).trimmed() == "1";
                     if (ready) break;
                 } catch (const std::exception&) {}
                 QThread::msleep(1000);
             }
-            require(ready && !mCancel,"Android did not finish starting for disk expansion.");
+            require(ready && !mCancel.requested(),"Android did not finish starting for disk expansion.");
             const auto script = QString(
                 "set -eu\n"
                 "dev=$(awk '$2 == \"/data\" && $3 == \"ext4\" { print $1; exit }' /proc/mounts)\n"
@@ -378,114 +393,141 @@ void UpdateController::finishStorageGrowth() {
 void UpdateController::work(std::function<void()> task, std::function<void()> finished,
                             std::function<void(const QString& error, bool network)> failed) {
     if (mBusy || mClosing) return;
-    mBusy = true; mCancel = false; refresh();
+    mBusy = true; mCancel.reset(); refresh();
     auto error = std::make_shared<QString>(); auto network = std::make_shared<bool>(false);
-    mWorker = QThread::create([task, error, network] {
+    auto unknownVersion = std::make_shared<bool>(false); const auto previousStatus = mStatus->text();
+    mWorker = QThread::create([task, error, network, unknownVersion] {
         try { task(); }
+        catch (const VersionUnavailable&) { *unknownVersion = true; }
         catch (const NetworkError& e) { *network = true; *error = QString::fromUtf8(e.what()); }
         catch (const std::exception& e) { *error = QString::fromUtf8(e.what()); }
     });
-    connect(mWorker, &QThread::finished, this, [this, error, network, finished, failed] {
+    connect(mWorker, &QThread::finished, this, [this, error, network, unknownVersion, previousStatus, finished, failed] {
         if (mClosing) return; mWorker->deleteLater(); mWorker = nullptr; mBusy = false;
-        if (!error->isEmpty() || mCancel) failed(*error, *network);
+        if (*unknownVersion) { refreshVersion(); status(previousStatus); refresh(); return; }
+        if (!error->isEmpty() || mCancel.requested()) failed(*error, *network);
         else finished();
         refresh();
     });
     mWorker->start();
 }
 void UpdateController::updateFailed(const QString& error, bool quiet) {
+    if (!refreshVersion()) return;
     mDownloaded = false; mPlan = {};
     try { if (!mStage.empty() && fs::is_directory(mStage)) writeText(mStage / "error.txt", error.toStdString()); } catch (...) {}
-    if (mCancel) {
-        status(QCoreApplication::translate("Kemu", "Download cancelled. You can check for updates again."));
+    if (mCancel.requested()) {
+        status(QCoreApplication::translate("Kemu", "Update cancelled. Downloaded files were kept; valid cached files will be reused when you retry."));
     } else {
         qWarning("Kemu update: %s", qUtf8Printable(error));
         status(QCoreApplication::translate("Kemu", "Update could not be completed. Please try again later.\n") + error);
         if (quiet) return;
     }
-    mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); showSettings();
+    showUpdatesPage();
 }
 void UpdateController::startup() {
     if (mBusy || mDownloaded) return;
     if (fs::exists(storage::requestPath(mAvd))) { finishStorageGrowth(); return; }
-    if (!refreshVersion()) { status(QString()); return; }
-    if (mAutoUpdate->isChecked() || fs::exists(mRoot / ".kemu-update")) check(true);
+    if (!refreshVersion()) return;
+    try {
+        if (!cleanupInstalledFullUpdate(mRoot)) {
+            QTimer::singleShot(1000, this, [this] { if (!mClosing) startup(); });
+            return;
+        }
+    } catch (const VersionUnavailable&) { return; }
+    catch (const std::exception& error) { qWarning("Kemu update cleanup: %s", error.what()); }
+    if (mAutoUpdate->isChecked()) check(true);
 }
 void UpdateController::check(bool automatic) {
-    if (mBusy || mFullInstallerPrompt || fs::exists(storage::requestPath(mAvd))) return;
-    if (!refreshVersion()) {
-        status(QString());
-        if (!automatic) {
-            UiMessageBox prompt(QMessageBox::Information, QCoreApplication::translate("Kemu", "Cannot detect current version"),
-                QCoreApplication::translate("Kemu", "Cannot detect the current version. Click OK to download the full installer."), QMessageBox::NoButton, mDialog);
-            auto* confirm = prompt.addButton(QCoreApplication::translate("Kemu", "OK"), QMessageBox::AcceptRole);
-            prompt.addButton(QCoreApplication::translate("Kemu", "Cancel"), QMessageBox::RejectRole);
-            prompt.exec();
-            if (prompt.clickedButton() == confirm) QDesktopServices::openUrl(QUrl(QString::fromUtf8(ReleasesUrl)));
-        }
-        return;
-    }
+    if (mBusy || mInstallPrompt || fs::exists(storage::requestPath(mAvd))) return;
+    if (!refreshVersion()) return;
     work([this] {
-        status(QCoreApplication::translate("Kemu", "Checking for updates...")); mDownloaded = false; mPlan = {};
         readVersion(mRoot);
+        status(QCoreApplication::translate("Kemu", "Checking for updates...")); mDownloaded = false; mPlan = {};
         require(!fs::exists(mRoot / ".kemu-update-pending"), "An unfinished update needs recovery; restart Kemu");
-        auto latest = mRoot / ".kemu-update-history.tmp";
-        if (mHistory) writeJson(latest, mHistory());
-        else download(HistoryUrl, latest, 8*1024*1024, [this] { return mCancel.load(); });
-        auto history = readJson(latest); fs::remove(latest);
+        const auto history = mHistory ? mHistory() : Json::parse(downloadText(HistoryUrl, 8*1024*1024,
+            [this] { return mCancel.requested(); }));
         mPlan = prepareUpdateTask(mRoot, history);
-        if (mPlan.requiresFullInstaller) return;
         mStage = mRoot / ".kemu-update";
         mDownloaded = loadDownloadedUpdate(mRoot, mStage, mPlan);
     }, [this, automatic] {
+        if (!refreshVersion()) return;
         setVersion(QString::fromStdString(mPlan.current));
-        const bool shouldPrompt = !automatic || mAutoUpdate->isChecked();
-        if (mPlan.requiresFullInstaller) {
-            const auto message = QCoreApplication::translate("Kemu", "A major update is available. Please download the full installer.");
-            status(message);
-            if (shouldPrompt) {
-                auto* prompt = new UiMessageBox(QMessageBox::Information, QCoreApplication::translate("Kemu", "Major update available"),
-                    message, QMessageBox::NoButton, mDialog->isVisible() ? mDialog : mWindow);
-                mFullInstallerPrompt = prompt;
-                prompt->setObjectName("KemuFullInstallerRequired");
-                prompt->setAttribute(Qt::WA_DeleteOnClose);
-                auto* download = prompt->addButton(QCoreApplication::translate("Kemu", "Download full installer"), QMessageBox::AcceptRole);
-                prompt->addButton(QCoreApplication::translate("Kemu", "Cancel"), QMessageBox::RejectRole);
-                connect(prompt, &QDialog::finished, this, [this, prompt, download] {
-                    if (!mClosing && prompt->clickedButton() == download)
-                        QDesktopServices::openUrl(QUrl(QString::fromUtf8(ReleasesUrl)));
-                });
-                prompt->open();
-            }
+        if (mPlan.current == mPlan.target) {
+            status(QCoreApplication::translate("Kemu", "You are up to date."));
             return;
         }
-        if (mDownloaded) {
-            status(QCoreApplication::translate("Kemu", "Update ready. Click Check for updates to continue installation."));
-            if (shouldPrompt) offerInstall();
-            return;
-        }
-        if (mPlan.current == mPlan.target) status(QCoreApplication::translate("Kemu", "You are up to date."));
-        else { status(QCoreApplication::translate("Kemu", "Version %1 is available; %2 files need updating. ").arg(QString::fromStdString(mPlan.target)).arg(mPlan.files.size())); if (!shouldPrompt) return; if (automatic || [this] {
-            UiMessageBox prompt(QMessageBox::Question, QCoreApplication::translate("Kemu", "New version available"),
-                QCoreApplication::translate("Kemu", "Version %1 is available. Download the update?").arg(QString::fromStdString(mPlan.target)), QMessageBox::NoButton, mDialog);
-            auto* yes = prompt.addButton(QCoreApplication::translate("Kemu", "Yes"), QMessageBox::YesRole);
-            prompt.addButton(QCoreApplication::translate("Kemu", "No"), QMessageBox::NoRole);
-            prompt.exec(); return prompt.clickedButton() == yes;
-        }()) fetch(automatic); }
-    }, [this, automatic](const QString& error, bool network) { updateFailed(error, automatic && network); });
+        status(mDownloaded
+            ? QCoreApplication::translate("Kemu", "Update ready. Click Check for updates to continue installation.")
+            : QCoreApplication::translate("Kemu", "Version %1 is available. Click Check for updates to confirm the download.").arg(QString::fromStdString(mPlan.target)));
+        if (automatic && !mAutoUpdate->isChecked()) return;
+        showUpdatesPage();
+        if (automatic) return;
+        if (mDownloaded) offerInstall();
+        else offerDownload();
+    }, [this](const QString& error, bool network) { updateFailed(error, network); });
 }
-void UpdateController::fetch(bool automatic) {
+void UpdateController::offerDownload() {
+    if (mInstallPrompt || mClosing) return;
+    auto* prompt = new UiMessageBox(QMessageBox::Question, QCoreApplication::translate("Kemu", "New version available"),
+        QCoreApplication::translate("Kemu", "Version %1 is available. Download the update now?").arg(QString::fromStdString(mPlan.target)),
+        QMessageBox::NoButton, mDialog);
+    mInstallPrompt = prompt;
+    prompt->setObjectName("KemuConfirmDownload"); prompt->setAttribute(Qt::WA_DeleteOnClose);
+    auto* yes = prompt->addButton(QCoreApplication::translate("Kemu", "Download"), QMessageBox::AcceptRole);
+    prompt->addButton(QCoreApplication::translate("Kemu", "Cancel"), QMessageBox::RejectRole);
+    connect(prompt, &QDialog::finished, this, [this, prompt, yes] {
+        mInstallPrompt = nullptr;
+        if (!mClosing && prompt->clickedButton() == yes) fetch();
+    });
+    prompt->open();
+}
+void UpdateController::fetch() {
+    if (!refreshVersion()) return;
     mProgress->setRange(0, 0); mProgress->show(); mCancelButton->setEnabled(true); mCancelButton->show();
     work([this] {
         require(readVersion(mRoot) == mPlan.current, "Local version changed; check updates again");
-        std::map<std::string, Release> packs;
+        const auto checkCancelled = [this] { mCancel.check(); };
+        const auto complete = [this, &checkCancelled] {
+            saveDownloadedUpdate(mStage, mPlan, checkCancelled, [this] {
+                // Cancellation and completion compete for a single atomic transition.
+                mCancel.beginCommit();
+                QMetaObject::invokeMethod(this, [this] { mCancelButton->setEnabled(false); }, Qt::QueuedConnection);
+            });
+            mDownloaded = true;
+        };
+        auto progress = [this](uint64_t done, uint64_t total) {
+            QMetaObject::invokeMethod(this, [this, done, total] {
+                if (mClosing) return;
+                mProgress->setRange(0, total ? 100 : 0);
+                if (total) mProgress->setValue(int(std::min<uint64_t>(100, done * 100 / total)));
+            }, Qt::QueuedConnection);
+        };
+        if (mPlan.requiresFullInstaller) {
+            status(QCoreApplication::translate("Kemu", "Downloading and verifying the full installer for %1...").arg(QString::fromStdString(mPlan.target)));
+            safePath(mStage, "installer-release.json");
+            mTransfer(std::string(ApiReleasesUrl) + mPlan.target,
+                mStage / "installer-release.json", 8*1024*1024, [this] { return mCancel.requested(); }, {});
+            const auto installer = selectInstaller(readJson(mStage / "installer-release.json"), mPlan.target);
+            auto partial = mStage / (installer.name + ".part");
+            safePath(mStage, installer.name + ".part"); safePath(mStage, installer.name);
+            if (fs::exists(mStage / installer.name) || fs::exists(partial)) {
+                try { complete(); return; }
+                catch (const InstallerIntegrityError&) {}
+            }
+            checkCancelled();
+            fs::remove(mStage / installer.name);
+            mTransfer(installer.url, partial, installer.size, [this] { return mCancel.requested(); }, progress);
+            checkCancelled();
+            complete();
+            return;
+        }
         for (const auto& [path, release] : mPlan.files) {
             if (path[0] == '/') require(path.rfind("/system/",0) == 0 || path.rfind("/vendor/",0) == 0 ||
                 path.rfind("/system_ext/",0) == 0 || path.rfind("/product/",0) == 0,
                 "Image burner cannot update this Android file: " + path + ". Download the full release: " + ReleasesUrl);
-            packs[release.version] = release;
         }
-        for (const auto& [version, release] : packs) {
+        for (const auto& release : mPlan.releases) {
+            const auto& version = release.version;
             status(QCoreApplication::translate("Kemu", "Downloading and verifying update %1...").arg(QString::fromStdString(version)));
             auto archive = mStage / (version + ".tar.xz"), extracted = mStage / version;
             safePath(mStage, version + ".tar.xz");
@@ -506,42 +548,44 @@ void UpdateController::fetch(bool automatic) {
             if (!cached) {
                 auto partial = mStage / (version + ".tar.xz.part");
                 safePath(mStage, version + ".tar.xz.part");
-                download(std::string(ReleasesUrl) + "/download/" + version + "/update-pack.tar.xz", partial, 8ull*1024*1024*1024, [this] { return mCancel.load(); },
-                [this](uint64_t done, uint64_t total) {
-                    QMetaObject::invokeMethod(this, [this, done, total] {
-                        if (mClosing) return;
-                        mProgress->setRange(0, total ? 100 : 0);
-                        if (total) mProgress->setValue(int(std::min<uint64_t>(100, done * 100 / total)));
-                    }, Qt::QueuedConnection);
-                });
-                require(!mCancel, "Update cancelled");
+                mTransfer(std::string(ReleasesUrl) + "/download/" + version + "/update-pack.tar.xz", partial, 8ull*1024*1024*1024,
+                    [this] { return mCancel.requested(); }, progress);
+                checkCancelled();
                 fs::rename(partial, archive);
                 unpack();
             }
-            require(!mCancel, "Update cancelled");
+            checkCancelled();
         }
         clearUpdateDirectory(mRoot, mStage / "payload"); clearUpdateDirectory(mRoot, mStage / "android");
         fs::create_directories(mStage / "payload"); fs::create_directories(mStage / "android");
         for (const auto& [path, release] : mPlan.files) {
+            checkCancelled();
             auto packed = path[0] == '/' ? "Android" + path : "Windows/" + path;
             auto destination = path[0] == '/' ? mStage / "android" / fs::u8path(path.substr(1)) : mStage / "payload" / fs::u8path(path);
             fs::create_directories(destination.parent_path()); fs::copy_file(mStage / release.version / fs::u8path(packed), destination);
         }
-        require(!mCancel, "Update cancelled");
-        saveDownloadedUpdate(mStage, mPlan);
-        mDownloaded = true;
-    }, [this, automatic] {
+        complete();
+    }, [this] {
         mProgress->hide(); mCancelButton->hide();
-        status(QCoreApplication::translate("Kemu", "Update downloaded. You will be prompted on next startup, or click Check for updates to install now."));
-        if (!automatic) offerInstall();
-    }, [this, automatic](const QString& error, bool network) { updateFailed(error, automatic && network); });
+        status(QCoreApplication::translate("Kemu", "Update ready. Click Check for updates to continue installation."));
+        offerInstall();
+    }, [this](const QString& error, bool network) { updateFailed(error, network); });
 }
 void UpdateController::offerInstall() {
-    UiMessageBox prompt(QMessageBox::Information, QCoreApplication::translate("Kemu", "Update ready"),
-        QCoreApplication::translate("Kemu", "The update has been downloaded and verified. Updating now will close and restart the emulator."), QMessageBox::NoButton, mDialog);
-    auto* now = prompt.addButton(QCoreApplication::translate("Kemu", "Update now"), QMessageBox::AcceptRole);
-    prompt.addButton(QCoreApplication::translate("Kemu", "Later"), QMessageBox::RejectRole);
-    prompt.exec(); if (prompt.clickedButton() == now) install();
+    if (mInstallPrompt || mClosing) return;
+    auto* prompt = new UiMessageBox(QMessageBox::Information, QCoreApplication::translate("Kemu", "Update ready"),
+        mPlan.requiresFullInstaller
+            ? QCoreApplication::translate("Kemu", "The full installer has been downloaded and verified. Updating now will close the emulator and open the installer.")
+            : QCoreApplication::translate("Kemu", "The update has been downloaded and verified. Updating now will close and restart the emulator."), QMessageBox::NoButton, mDialog);
+    mInstallPrompt = prompt;
+    prompt->setObjectName("KemuUpdateReady"); prompt->setAttribute(Qt::WA_DeleteOnClose);
+    auto* now = prompt->addButton(QCoreApplication::translate("Kemu", "Update now"), QMessageBox::AcceptRole);
+    prompt->addButton(QCoreApplication::translate("Kemu", "Later"), QMessageBox::RejectRole);
+    connect(prompt, &QDialog::finished, this, [this, prompt, now] {
+        mInstallPrompt = nullptr;
+        if (!mClosing && prompt->clickedButton() == now) install();
+    });
+    prompt->open();
 }
 QByteArray UpdateController::adbCommand(const QString& adb, const QString& serial, const QStringList& args, int timeout, bool cancellable) {
     require(!adb.isEmpty() && serial.startsWith("emulator-"), "ADB for this emulator is unavailable");
@@ -552,7 +596,7 @@ QByteArray UpdateController::adbCommand(const QString& adb, const QString& seria
     require(process.waitForStarted(10000), "Cannot start ADB"); QElapsedTimer timer; timer.start(); QByteArray output;
     while (!process.waitForFinished(100)) {
         output += process.readAll(); if (output.size() > 4*1024*1024) output = output.right(4*1024*1024);
-        if ((cancellable && mCancel) || timer.elapsed() > timeout) { process.kill(); process.waitForFinished(5000); throw std::runtime_error("ADB operation cancelled or timed out"); }
+        if ((cancellable && mCancel.requested()) || timer.elapsed() > timeout) { process.kill(); process.waitForFinished(5000); throw std::runtime_error("ADB operation cancelled or timed out"); }
     }
     output += process.readAll(); require(process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0, "ADB failed: " + output.toStdString()); return output;
 }
@@ -580,9 +624,9 @@ void UpdateController::prepare(const QString& adb, const QString& serial) {
         status(QCoreApplication::translate("Kemu", "Creating a new system image inside the emulator. Keep the emulator running..."));
         QElapsedTimer bootWait; bootWait.start();
         for (;;) {
-            require(!mCancel && bootWait.elapsed() < 300000, "Android did not finish booting before installation");
+            require(!mCancel.requested() && bootWait.elapsed() < 300000, "Android did not finish booting before installation");
             try { if (adbCommand(adb, serial, {"shell","getprop","sys.boot_completed"}, 5000).trimmed() == "1") break; }
-            catch (const std::exception&) { require(!mCancel, "Update cancelled"); }
+            catch (const std::exception&) { mCancel.check(); }
             QThread::msleep(250);
         }
         adbCommand(adb, serial, {"shell","test","-x","/system/bin/kemu_image_burner"});
@@ -626,21 +670,52 @@ void UpdateController::prepare(const QString& adb, const QString& serial) {
     validateJob(mRoot, mStage);
 }
 void UpdateController::install() {
+    if (!refreshVersion()) return;
+    if (mPlan.requiresFullInstaller) {
+        work([this] {
+            fs::path stage; Plan plan;
+            require(loadDownloadedUpdate(mRoot, stage, plan, FullInstallerCheck::MetadataOnly) &&
+                    plan.requiresFullInstaller && plan.target == mPlan.target,
+                    "The installer is no longer valid; check updates again");
+            safePath(mStage, "KemuInstallerLauncher.exe");
+            fs::copy_file(mRoot / "KemuUpdater.exe", mStage / "KemuInstallerLauncher.exe", fs::copy_options::overwrite_existing);
+        }, [this] { handoff(true); }, [this](const QString& error, bool) { updateFailed(error, false); });
+        return;
+    }
     auto adb = mAdb(), serial = mSerial();
-    work([this, adb, serial] { fs::remove(mStage / "downloaded.json"); prepare(adb, serial); }, [this] {
-        try {
-            require(!fs::exists(mRoot / ".kemu-update-pending"), "Another update is pending");
-            fs::remove(mStage / "updater-ready");
-            writeJson(mRoot / ".kemu-update-pending", {{"stage",mStage.filename().u8string()}});
-            require(startDetachedProcess(qpath(mRoot / "KemuUpdater.exe"), {"--apply",qpath(mStage),QString::number(GetCurrentProcessId())}, qpath(mRoot)), "Cannot start updater");
-            mBusy = true; status(QCoreApplication::translate("Kemu", "Images and files verified. Handing over to the updater..."));
-            auto* timer = new QTimer(this); auto elapsed = std::make_shared<QElapsedTimer>(); elapsed->start();
-            connect(timer, &QTimer::timeout, this, [this, timer, elapsed] {
-                if (fs::exists(mStage / "updater-ready")) { timer->stop(); timer->deleteLater(); mWindow->close(); }
-                else if (elapsed->elapsed() > 120000) { timer->stop(); timer->deleteLater(); status(QCoreApplication::translate("Kemu", "The updater is not ready. The emulator remains open. Restart Kemu to recover.")); mBusy = false; refresh(); }
-            }); timer->start(200);
-        } catch (const std::exception& e) { status(QString::fromUtf8(e.what())); }
-    }, [this](const QString& error, bool) { updateFailed(error, false); });
+    work([this, adb, serial] { fs::remove(mStage / "downloaded.json"); prepare(adb, serial); },
+        [this] { handoff(false); }, [this](const QString& error, bool) { updateFailed(error, false); });
+}
+void UpdateController::handoff(bool fullInstaller) {
+    try {
+        require(!fs::exists(mRoot / ".kemu-update-pending"), "Another update is pending");
+        const auto ready = mStage / (fullInstaller ? "installer-ready" : "updater-ready");
+        fs::remove(ready);
+        if (fullInstaller) fs::remove(mStage / "installer-error.json");
+        if (!fullInstaller) writeJson(mRoot / ".kemu-update-pending", {{"stage",mStage.filename().u8string()}});
+        auto helper = fullInstaller ? mStage / "KemuInstallerLauncher.exe" : mRoot / "KemuUpdater.exe";
+        require(startDetachedProcess(qpath(helper), {fullInstaller ? "--install" : "--apply",qpath(mStage),QString::number(GetCurrentProcessId())}, qpath(mRoot)), "Cannot start updater");
+        mBusy = true; status(fullInstaller
+            ? QCoreApplication::translate("Kemu", "Installer verified. Preparing to open the installer...")
+            : QCoreApplication::translate("Kemu", "Images and files verified. Handing over to the updater..."));
+        auto* timer = new QTimer(this); auto elapsed = std::make_shared<QElapsedTimer>(); elapsed->start();
+        connect(timer, &QTimer::timeout, this, [this, timer, elapsed, ready, fullInstaller] {
+            if (fullInstaller && fs::exists(mStage / "installer-error.json")) {
+                try {
+                    const auto error = readJson(mStage / "installer-error.json");
+                    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, error.at("pid").get<DWORD>());
+                    const bool exited = !process || WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+                    if (process) CloseHandle(process);
+                    if (exited) {
+                        timer->stop(); timer->deleteLater(); mBusy = false;
+                        updateFailed(QString::fromStdString(error.at("message").get<std::string>()), true); refresh();
+                        return;
+                    }
+                } catch (const std::exception&) {}
+            }
+            if (fs::exists(ready)) { timer->stop(); timer->deleteLater(); mWindow->close(); }
+            else if (elapsed->elapsed() > 120000) { timer->stop(); timer->deleteLater(); status(QCoreApplication::translate("Kemu", "The updater is not ready. The emulator remains open. Restart Kemu to recover.")); mBusy = false; refresh(); }
+        }); timer->start(200);
+    } catch (const std::exception& e) { updateFailed(QString::fromUtf8(e.what()), false); }
 }
 }
-

@@ -124,16 +124,17 @@ if(WINDOWS_MSVC_X86_64)
         ${CMAKE_CURRENT_LIST_DIR}/src/LegalInfoDialog.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateCore.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateDownload.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/update/UpdateNetwork.cpp
         ${CMAKE_CURRENT_LIST_DIR}/update/UpdateTransaction.cpp)
     target_include_directories(aemu-ui-qt PRIVATE ${KEMU_JSON})
     target_link_libraries(aemu-ui-qt PRIVATE kemu-update-xz bcrypt winhttp)
-    add_executable(KemuUpdater WIN32 update/UpdaterMain.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp resources/kemu.rc)
+    add_executable(KemuUpdater WIN32 update/UpdaterMain.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateNetwork.cpp update/InstallerSource.cpp resources/kemu.rc)
     target_compile_features(KemuUpdater PRIVATE cxx_std_17)
     target_compile_definitions(KemuUpdater PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     # The helper must not load runtime DLLs from the installation it replaces.
     target_compile_options(KemuUpdater PRIVATE /MT)
     target_include_directories(KemuUpdater PRIVATE ${KEMU_JSON} resources)
-    target_link_libraries(KemuUpdater PRIVATE bcrypt user32 shell32 libcmt libcpmt libvcruntime libucrt)
+    target_link_libraries(KemuUpdater PRIVATE bcrypt winhttp user32 shell32 libcmt libcpmt libvcruntime libucrt)
     set_target_properties(KemuUpdater PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
     android_license(TARGET KemuUpdater LIBNAME Kemu
         URL "https://github.com/kuloPo/Kemu-emulator_external_qemu"
@@ -141,7 +142,7 @@ if(WINDOWS_MSVC_X86_64)
         LICENSE "https://github.com/kuloPo/Kemu-emulator_external_qemu/blob/kemu/main/kemu-qt/LICENSE"
         LOCAL "${CMAKE_CURRENT_LIST_DIR}/LICENSE")
     android_install_exe(KemuUpdater .)
-    add_executable(kemu-update-tests tests/UpdateTests.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    add_executable(kemu-update-tests tests/UpdateTests.cpp update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp update/UpdateNetwork.cpp)
     target_compile_features(kemu-update-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(kemu-update-tests PRIVATE ${KEMU_JSON} update)
@@ -150,7 +151,7 @@ if(WINDOWS_MSVC_X86_64)
 endif()
 
 if(WINDOWS_MSVC_X86_64)
-    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp src/LegalInfoDialog.cpp src/StorageMoveDialog.cpp resources/kemu.qrc update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp)
+    add_executable(kemu-update-ui-tests ${KEMU_LANGUAGE_SOURCES} tests/UpdateUiTests.cpp src/UpdateController.cpp src/LegalInfoDialog.cpp src/StorageMoveDialog.cpp resources/kemu.qrc update/UpdateCore.cpp update/UpdateTransaction.cpp update/UpdateDownload.cpp update/UpdateNetwork.cpp)
     add_dependencies(kemu-update-ui-tests kemu-translations)
     target_compile_features(kemu-update-ui-tests PRIVATE cxx_std_17)
     target_compile_definitions(kemu-update-ui-tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -176,4 +177,15 @@ if(WINDOWS_MSVC_X86_64)
     target_include_directories(kemu-update-handoff-tests PRIVATE ${KEMU_JSON} update)
     target_link_libraries(kemu-update-handoff-tests PRIVATE bcrypt libcmt libcpmt libvcruntime libucrt)
     set_target_properties(kemu-update-handoff-tests PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
+endif()
+
+if(WINDOWS_MSVC_X86_64)
+    add_executable(kemu-updater-test-helper WIN32 update/UpdaterMain.cpp update/UpdateCore.cpp
+        update/UpdateTransaction.cpp tests/InstallerSourceFixture.cpp)
+    target_compile_features(kemu-updater-test-helper PRIVATE cxx_std_17)
+    target_compile_definitions(kemu-updater-test-helper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(kemu-updater-test-helper PRIVATE /MT)
+    target_include_directories(kemu-updater-test-helper PRIVATE ${KEMU_JSON})
+    target_link_libraries(kemu-updater-test-helper PRIVATE bcrypt user32 shell32 libcmt libcpmt libvcruntime libucrt)
+    set_target_properties(kemu-updater-test-helper PROPERTIES AUTOMOC OFF AUTORCC OFF AUTOUIC OFF)
 endif()
