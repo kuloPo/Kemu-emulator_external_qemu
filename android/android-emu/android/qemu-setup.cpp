@@ -575,9 +575,7 @@ bool android_emulation_setup(const AndroidConsoleAgents* agents, bool isQemu2) {
 void android_emulation_teardown() {
     android::automation::AutomationController::shutdown();
     android::base::CpuUsage::get()->stop();
-    auto adbConn = android::emulation::AdbConnection::connection(std::chrono::milliseconds(0));
-    if (adbConn)
-        adbConn->close();
+    android::emulation::AdbConnection::shutdown();
     auto memTracker = android::base::MemoryTracker::get();
     if (memTracker)
         memTracker->stop();

@@ -221,7 +221,7 @@ public:
     // Called when we received bytes from the remote id.
     void receive(const std::vector<char>& msg);
 
-    // Blocks and waits returning true when we unlock, or false for timeout.
+    // Waits for the open acknowledgement, returning false on close or timeout.
     bool waitForUnlock(
             std::chrono::milliseconds timeoutMs = std::chrono::milliseconds::max());
 
@@ -243,7 +243,7 @@ private:
     bool readyForWrite();
 
     int32_t mClientId;      // Stream ID our side.
-    int64_t mRemoteId{-1};  // Stream ID on the ADB side.
+    std::atomic<int64_t> mRemoteId{-1};  // Stream ID on the ADB side.
     bool mReady = false;
     AdbConnectionImpl* mConnection;
 
@@ -330,6 +330,7 @@ public:
     // Returns true if we are connected, or false otherwise.
     bool connectToEmulator(std::chrono::milliseconds timeoutMs) {
         base::AutoLock connectLock(mConnectLock);
+        if (mShuttingDown) return false;
         if (!mSocket->connectSync(timeoutMs)) {
             DD("Failed to connect to socket.");
             return false;
@@ -342,28 +343,29 @@ public:
             // Only send out a connect request if we are disconnected.
             // We never want to send more than one on an open connection,
             // otherwise things will go haywire
-            if (state() == AdbState::socket) {
+            if (!mShuttingDown && state() == AdbState::socket) {
                 mState = AdbState::connecting;
                 sendConnect = true;
                 sendCnxn();
             }
 
-            while (state() != AdbState::connected &&
+            while (!mShuttingDown && state() != AdbState::connected &&
                    System::get()->getUnixTimeUs() < waitUntil) {
                 auto why = mStateCv.timedWait(&mStateLock, waitUntil);
             }
         }
-        if (sendConnect && state() == AdbState::connecting) {
+        if (!mShuttingDown && sendConnect && state() == AdbState::connecting) {
             // Assume that our message went into the void..
             DD("No timely response, closing socket.");
             mSocket->close();
         }
-        return state() == AdbState::connected;
+        return !mShuttingDown && state() == AdbState::connected;
     }
 
     // Finalizes and sends out the packet. Setting field information
     // as needed.
     void send(apacket& packet) {
+        if (mShuttingDown) return;
         packet.msg.data_length = packet.payload.size();
         packet.msg.magic = packet.msg.command ^ 0xffffffff;
 
@@ -394,21 +396,23 @@ public:
             D("Open %s, not yet connected", id.c_str());
             return std::make_shared<BasicAdbStream>(nullptr);
         }
-        auto buf = new AdbStreambuf(mNextClientId, this);
-        auto myId = mNextClientId++;
+        AdbStreambuf* buf;
         std::shared_ptr<BasicAdbStream> stream;
         {
             android::base::AutoLock lock(mActiveStreamsLock);
+            if (mShuttingDown) return std::make_shared<BasicAdbStream>(nullptr);
+            const auto myId = mNextClientId++;
+            buf = new AdbStreambuf(myId, this);
             // TODO(jansene): Do we need push/pull support?
             stream = std::make_shared<BasicAdbStream>(buf);
             mActiveStreams[myId] = stream;
             buf->open(id);
         }
 
-        if (!buf->waitForUnlock(timeout)) {
+        if (!buf->waitForUnlock(timeout) || mShuttingDown) {
             // Okay, we failed.. We should close our socket and redo the
             // handshake if we are not showing a ui..
-            if (state() != AdbState::offer_key) {
+            if (!mShuttingDown && state() != AdbState::offer_key) {
                 D("Not showing offer key dialog, closing connection.");
                 mSocket->close();
             }
@@ -483,6 +487,7 @@ public:
 
     void setState(const AdbState newState) {
         base::AutoLock lock(mStateLock);
+        if (mShuttingDown) return;
         if (mState == AdbState::failed) {
             LOG(VERBOSE) << "We are in a failed state.. We give up.";
             sAdbInternalDisabled = true;
@@ -697,6 +702,18 @@ public:
 
     void close() override { mSocket->close(); }
 
+    void shutdown() {
+        {
+            base::AutoLock lock(mStateLock);
+            if (mShuttingDown) return;
+            mShuttingDown = true;
+            mState = AdbState::disconnected;
+            mStateCv.broadcast();
+        }
+        closeStreams();
+        mSocket->dispose();
+    }
+
 private:
     std::unique_ptr<AsyncSocketAdapter> mSocket;   // Socket to adbd in emulator
     apacket mIncoming{.msg = {0}, .payload = {}};  // Incoming packet
@@ -708,6 +725,7 @@ private:
 
     Lock mStateLock;
     Lock mConnectLock;
+    std::atomic<bool> mShuttingDown{false};
     ConditionVariable mStateCv;
     std::atomic<AdbState> mState{
             AdbState::disconnected};        // Current connection state
@@ -728,11 +746,15 @@ private:
 static std::shared_ptr<AdbConnectionImpl> gAdbConnection;
 
 std::shared_ptr<AdbConnection> AdbConnection::connection(std::chrono::milliseconds timeoutMs) {
-    if (timeoutMs.count() > 0 && !gAdbConnection->connectToEmulator(timeoutMs)) {
+    if (gAdbConnection && timeoutMs.count() > 0 && !gAdbConnection->connectToEmulator(timeoutMs)) {
         LOG(VERBOSE) << "Timeout:" << timeoutMs.count()
                      << "Connection state: " << gAdbConnection->state();
     }
     return gAdbConnection;
+}
+
+void AdbConnection::shutdown() {
+    if (gAdbConnection) gAdbConnection->shutdown();
 }
 
 bool AdbConnection::failed() {
@@ -802,7 +824,7 @@ bool AdbStreambuf::waitForUnlock(std::chrono::milliseconds timeoutms) {
     while (!mReady && System::get()->getUnixTimeUs() < waitUntil) {
         mWriterCV.timedWait(&mWriterLock, waitUntil);
     }
-    return mReady;
+    return mReady && isOpen();
 }
 
 // Returns true if the OKAY packet has been received.

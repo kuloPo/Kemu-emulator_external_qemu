@@ -19,6 +19,7 @@
 #include "android/base/testing/TestSystem.h"
 
 #include <atomic>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -214,6 +215,72 @@ TEST_F(AdbConnectionTest, canParseFeatures) {
     EXPECT_EQ(AdbState::connected, adb->state());
     EXPECT_TRUE(adb->hasFeature("foo"));
     EXPECT_FALSE(adb->hasFeature("fos"));
+}
+
+TEST_F(AdbConnectionTest, shutdownRejectsReconnect) {
+    mSocket->addRecvs({".*", "host::features=.*"}, connectMsg());
+    auto adb = AdbConnection::connection(FAST_TIMEOUT);
+    ASSERT_EQ(AdbState::connected, adb->state());
+    AdbConnection::shutdown();
+    AdbConnection::shutdown();
+    EXPECT_EQ(AdbState::disconnected, adb->state());
+    EXPECT_FALSE(mSocket->connected());
+    EXPECT_EQ(adb, AdbConnection::connection(FAST_TIMEOUT));
+    EXPECT_TRUE(adb->open("shell:ls", FAST_TIMEOUT)->bad());
+    EXPECT_FALSE(mSocket->connected());
+}
+
+TEST_F(AdbConnectionTest, shutdownWakesHandshake) {
+    using namespace std::chrono_literals;
+    mSocket->addRecvs({".*", "host::features=.*"}, DO_NO_REPLY);
+    auto adb = AdbConnection::connection(0ms);
+    auto pending = std::async(std::launch::async, [] { return AdbConnection::connection(5s); });
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (adb->state() != AdbState::connecting && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_EQ(AdbState::connecting, adb->state());
+    AdbConnection::shutdown();
+    EXPECT_EQ(std::future_status::ready, pending.wait_for(1s));
+    EXPECT_EQ(adb, pending.get());
+    EXPECT_EQ(AdbState::disconnected, adb->state());
+}
+
+TEST_F(AdbConnectionTest, shutdownWakesStreamReader) {
+    using namespace std::chrono_literals;
+    mSocket->addRecvs({".*", "host::features=.*"}, connectMsg());
+    mSocket->addRecvs({"OPEN.*", "shell:ls"}, okayMsg(1, 1));
+    auto adb = AdbConnection::connection(FAST_TIMEOUT);
+    auto stream = adb->open("shell:ls", FAST_TIMEOUT);
+    ASSERT_TRUE(stream->good());
+    auto reader = std::async(std::launch::async, [stream] {
+        char byte;
+        return static_cast<bool>(stream->read(&byte, 1));
+    });
+    AdbConnection::shutdown();
+    EXPECT_EQ(std::future_status::ready, reader.wait_for(1s));
+    EXPECT_FALSE(reader.get());
+}
+
+TEST_F(AdbConnectionTest, shutdownCancelsPendingOpen) {
+    using namespace std::chrono_literals;
+    mSocket->addRecvs({".*", "host::features=.*"}, connectMsg());
+    mSocket->addRecvs({"OPEN.*", "shell:ls"}, DO_NO_REPLY);
+    auto adb = AdbConnection::connection(FAST_TIMEOUT);
+    ASSERT_EQ(AdbState::connected, adb->state());
+    auto pending = std::async(std::launch::async, [adb] { return adb->open("shell:ls", 5s); });
+    EXPECT_EQ(std::future_status::timeout, pending.wait_for(50ms));
+    AdbConnection::shutdown();
+    EXPECT_EQ(std::future_status::ready, pending.wait_for(1s));
+    EXPECT_TRUE(pending.get()->bad());
+}
+
+TEST_F(AdbConnectionTest, peerCloseRejectsPendingOpen) {
+    mSocket->addRecvs({".*", "host::features=.*"}, connectMsg());
+    mSocket->addRecvs({"OPEN.*", "shell:ls"}, closeMsg(0, 1));
+    auto adb = AdbConnection::connection(FAST_TIMEOUT);
+    ASSERT_EQ(AdbState::connected, adb->state());
+    EXPECT_TRUE(adb->open("shell:ls", FAST_TIMEOUT)->bad());
 }
 
 // Disabled until we support loading rsa keys from memory..

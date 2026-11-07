@@ -123,6 +123,7 @@ class AsyncSocket : public AsyncSocketAdapter {
      * - No events will be delivered.
      * - No send/recv/connect/close calls will be made.
      * - The socket can be closed, and any ongoing connects should stop.
+     * Keep the socket alive until all concurrent dispose() calls return.
      */
     void dispose() override;
 
@@ -140,7 +141,7 @@ class AsyncSocket : public AsyncSocketAdapter {
     void wantWrite();
 
     // Attempts to connect to the specified port.
-    void connectToPort();
+    void connectToPort(uint64_t generation);
 
     void scheduleCallback(std::function<void()> callback);
 
@@ -148,11 +149,14 @@ class AsyncSocket : public AsyncSocketAdapter {
     static const int WRITE_BUFFER_SIZE = 1024;
 
     ScopedSocket mSocket;
+    ScopedSocket mPendingSocket;
 
     // Port to connect to, or -1 if this is an incoming socket.
     int mPort;
     Looper* mLooper;
     std::atomic<bool> mConnecting{false};
+    std::atomic<bool> mDisposed{false};
+    std::atomic<uint64_t> mConnectGeneration{0};
     std::unique_ptr<Looper::FdWatch> mFdWatch;
 
     android::base::AsyncWriter mAsyncWriter;
@@ -183,10 +187,13 @@ class AsyncSocket : public AsyncSocketAdapter {
     // when a callback is active.
     std::recursive_mutex mListenerLock;
 
-    std::mutex mInflightMutex;
-    std::condition_variable mInflightCv;
-    int mInflight{0};
-    bool mClosing{false};
+    // Queued callbacks may outlive the socket when its looper stops.
+    struct CallbackState {
+        std::recursive_mutex mutex;
+        bool active = true;
+    };
+    std::shared_ptr<CallbackState> mCallbackState =
+            std::make_shared<CallbackState>();
 };
 
 }  // namespace base

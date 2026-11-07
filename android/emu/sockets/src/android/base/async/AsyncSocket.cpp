@@ -46,14 +46,6 @@ static void socket_watcher(void* opaque, int fd, unsigned events) {
 
 AsyncSocket::~AsyncSocket() {
     dispose();
-    if (mConnectThread) {
-        mConnecting = false;
-        mConnectThread->join();
-    }
-    mClosing = true;
-    // Note that mInflight will now only decrease
-    std::unique_lock<std::mutex> lock(mInflightMutex);
-    mInflightCv.wait(lock, [this] { return mInflight == 0; });
 }
 
 AsyncSocket::AsyncSocket(Looper* looper, int port)
@@ -71,21 +63,15 @@ AsyncSocket::AsyncSocket(Looper* looper, ScopedSocket socket)
 }
 
 void AsyncSocket::scheduleCallback(std::function<void()> callback) {
-    if (mClosing) return;
-
+    auto guarded = [state = mCallbackState, cb = std::move(callback)] {
+        std::lock_guard<std::recursive_mutex> lock(state->mutex);
+        if (state->active) cb();
+    };
     if (mLooper->onLooperThread()) {
-        callback();
+        guarded();
         return;
     }
-
-    std::lock_guard<std::mutex> lock(mInflightMutex);
-    mInflight++;
-    mLooper->scheduleCallback([&, cb = std::move(callback)]() {
-        cb();
-        std::lock_guard<std::mutex> lock(mInflightMutex);
-        mInflight--;
-        mInflightCv.notify_all();
-    });
+    mLooper->scheduleCallback(std::move(guarded));
 };
 
 void AsyncSocket::wantRead() {
@@ -137,7 +123,7 @@ void AsyncSocket::wantWrite() {
 }
 
 ssize_t AsyncSocket::send(const char* buffer, uint64_t bufferSize) {
-    if (!mFdWatch) {
+    if (mDisposed || !mFdWatch) {
         errno = ECONNRESET;
         return -1;
     }
@@ -186,10 +172,20 @@ void AsyncSocket::onWrite() {
 }
 
 void AsyncSocket::dispose() {
-    // Only close if we are not actively closing.
+    // The flag rejects new I/O; every caller still waits for cleanup.
+    mDisposed = true;
     close();
-    std::unique_lock<std::mutex> watchLock(mWatchLock);
-    mWatchLockCv.wait(watchLock, [this] { return mFdWatch == nullptr; });
+    {
+        std::lock_guard<std::mutex> connectLock(mConnectThreadLock);
+        if (mConnectThread && mConnectThread->joinable()) mConnectThread->join();
+    }
+    {
+        std::unique_lock<std::mutex> watchLock(mWatchLock);
+        mWatchLockCv.wait(watchLock, [this] { return mFdWatch == nullptr; });
+    }
+    // Wait only for a running callback, not callbacks queued on a stopped loop.
+    std::lock_guard<std::recursive_mutex> callbackLock(mCallbackState->mutex);
+    mCallbackState->active = false;
     setSocketEventListener(nullptr);
 }
 
@@ -200,24 +196,32 @@ bool AsyncSocket::waitForSend(const std::chrono::milliseconds& rel_time) {
 }
 
 void AsyncSocket::close() {
-    if (!mFdWatch) {
-        // Already closed
-        return;
-    }
-    scheduleCallback([this]() {
+    uint64_t generation;
+    {
         std::lock_guard<std::mutex> watchLock(mWatchLock);
-        mFdWatch.reset();
-        mSocket.close();
+        generation = ++mConnectGeneration;
         mConnecting = false;
+        mPendingSocket.close();
+        mWatchLockCv.notify_all();
+        if (!mFdWatch) return;
+    }
+    scheduleCallback([this, generation]() {
+        {
+            std::lock_guard<std::mutex> watchLock(mWatchLock);
+            if (generation != mConnectGeneration) return;
+            mFdWatch.reset();
+            mSocket.close();
+            mWatchLockCv.notify_all();
+        }
         if (mListener) {
             mListener->onClose(this, errno);
         }
-        mWatchLockCv.notify_all();
     });
 }
 
 bool AsyncSocket::connect() {
     std::lock_guard<std::mutex> connectLock(mConnectThreadLock);
+    if (mDisposed) return false;
     if (mConnecting) {
         return true;
     }
@@ -231,8 +235,12 @@ bool AsyncSocket::connect() {
     if (mConnectThread) {
         mConnectThread->join();
     }
+    std::lock_guard<std::mutex> watchLock(mWatchLock);
+    if (mDisposed) return false;
     mConnecting = true;
-    mConnectThread = std::make_unique<std::thread>([this] { connectToPort(); });
+    const auto generation = ++mConnectGeneration;
+    mConnectThread = std::make_unique<std::thread>(
+            [this, generation] { connectToPort(generation); });
     return true;
 }
 
@@ -240,48 +248,56 @@ bool AsyncSocket::connectSync(std::chrono::milliseconds timeout) {
     if (!this->connect()) return false;
 
     std::unique_lock<std::mutex> watchLock(mWatchLock);
-    mWatchLockCv.wait_for(watchLock, timeout, [this]() { return connected(); });
-    return connected();
+    const auto done = [this] { return mDisposed || !mConnecting; };
+    if (timeout == std::chrono::milliseconds::max()) {
+        mWatchLockCv.wait(watchLock, done);
+    } else {
+        mWatchLockCv.wait_for(watchLock, timeout, done);
+    }
+    return !mDisposed && !mConnecting && connected();
 }
 
-void AsyncSocket::connectToPort() {
-    int socket = 0;
-    while (socket < 1 && mConnecting) {
+void AsyncSocket::connectToPort(uint64_t generation) {
+    int socket = -1;
+    const auto cancelled = [this, generation] {
+        return mDisposed || generation != mConnectGeneration;
+    };
+    while (socket < 0 && !cancelled()) {
         socket = socketTcp4LoopbackClient(mPort);
-        if (socket < 0) {
+        if (socket < 0 && !cancelled()) {
             socket = socketTcp6LoopbackClient(mPort);
         }
         if (socket < 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::unique_lock<std::mutex> watchLock(mWatchLock);
+            mWatchLockCv.wait_for(watchLock, std::chrono::seconds(1), cancelled);
         }
     }
-    if (socket < 1) {
+    if (socket < 0) {
         return;
     }
 
-    mSocket = socket;
-    socketSetNonBlocking(mSocket.get());
+    ScopedSocket pendingSocket(socket);
     std::lock_guard<std::mutex> watchLock(mWatchLock);
-    mFdWatch = std::unique_ptr<Looper::FdWatch>(
-            mLooper->createFdWatch(mSocket.get(), socket_watcher, this));
-    wantRead();
-
-    // Now we have to notify the listener, if any
-    std::mutex waitForNotification;
-    std::unique_lock<std::mutex> waitForNotificationLock(waitForNotification);
-    std::condition_variable waitForNotificationCv;
-    mLooper->scheduleCallback([&] {
+    if (cancelled()) return;
+    mPendingSocket = std::move(pendingSocket);
+    // Finish on the owner loop without making the connector wait for it.
+    // The generation prevents a cancelled callback from reviving a connection.
+    scheduleCallback([this, generation, cancelled] {
+        {
+            std::lock_guard<std::mutex> watchLock(mWatchLock);
+            if (cancelled()) return;
+            mSocket = std::move(mPendingSocket);
+            socketSetNonBlocking(mSocket.get());
+            mFdWatch.reset(mLooper->createFdWatch(mSocket.get(), socket_watcher, this));
+            mFdWatch->wantRead();
+        }
         if (mListener) {
             mListener->onConnected(this);
         }
-        std::unique_lock<std::mutex> waitForNotificationLock(waitForNotification);
-        waitForNotificationCv.notify_all();
+        std::lock_guard<std::mutex> watchLock(mWatchLock);
+        if (generation == mConnectGeneration) mConnecting = false;
+        mWatchLockCv.notify_all();
     });
-
-    // We now wait until the notification has been sent out.
-    waitForNotificationCv.wait(waitForNotificationLock);
-    mConnecting = false;
-    mWatchLockCv.notify_all();
 }
 
 }  // namespace base

@@ -117,6 +117,10 @@ public:
     // not returning ::connected, which is needed for querying features.
     static std::shared_ptr<AdbConnection> connection(std::chrono::milliseconds timeoutMs);
 
+    // Permanently stop the internal connection and wake pending stream users.
+    // Call on the socket's looper thread before that thread exits.
+    static void shutdown();
+
     // Inject the adb socket into the connection. This should be called
     // before anyone obtains a reference to an AdbConnection.
     // The AdbConnection will take ownership of the socket.
