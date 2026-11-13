@@ -106,7 +106,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
             return cancelled ? 0 : 1;
         }
-        MessageBoxW(nullptr, (L"Kemu 更新未完成\n\n" + detail + L"\n\n已保留更新日志与备份；再次启动 Kemu 可恢复未完成的替换。").c_str(), L"Kemu 更新", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, (L"The Kemu update could not finish.\n\n" + detail +
+            L"\n\nUpdate logs and backups have been kept. Start Kemu again to recover the unfinished update.").c_str(),
+            L"Kemu Update", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

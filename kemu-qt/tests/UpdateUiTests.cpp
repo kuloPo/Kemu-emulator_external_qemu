@@ -622,7 +622,7 @@ int main(int argc, char** argv) {
     QTimer promptCloser;
     QObject::connect(&promptCloser, &QTimer::timeout, [&] {
         if (auto* prompt = window.findChild<QMessageBox*>()) {
-            startupPrompt = prompt->windowTitle() == QStringLiteral("更新已就绪");
+            startupPrompt = prompt->windowTitle() == QCoreApplication::translate("Kemu", "Update ready");
             prompt->reject();
         }
     });
@@ -642,7 +642,7 @@ int main(int argc, char** argv) {
                 for (bool enabled : {false, true}) {
                     initial->setChecked(enabled); bool offered = false;
                     QEventLoop wait; QTimer poll;
-                    QObject::connect(&poll, &QTimer::timeout, [&] { if (auto* box = window.findChild<QMessageBox*>()) { offered = box->windowTitle() == QStringLiteral("更新已就绪"); box->reject(); wait.quit(); } });
+                    QObject::connect(&poll, &QTimer::timeout, [&] { if (auto* box = window.findChild<QMessageBox*>()) { offered = box->windowTitle() == QCoreApplication::translate("Kemu", "Update ready"); box->reject(); wait.quit(); } });
                     poll.start(10); QTimer::singleShot(5000, &wait, &QEventLoop::quit);
                     dialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
                     wait.exec();
@@ -651,7 +651,7 @@ int main(int argc, char** argv) {
             }
             dialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(0);
             auto* automatic=dialog->findChild<QCheckBox*>("KemuAutoUpdate");
-            require(automatic->text() == QStringLiteral("自动更新"), "Automatic update checkbox was not translated");
+            require(automatic->text() == QStringLiteral("\u81ea\u52a8\u66f4\u65b0"), "Automatic update checkbox was not translated");
             auto* showFrameRate = dialog->findChild<QCheckBox*>("KemuShowFrameRate");
             require(showFrameRate && !showFrameRate->isChecked() && showFrameRate->isVisible(),
                     "Frame rate option must default to off on the General page");

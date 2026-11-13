@@ -34,7 +34,8 @@ public:
         mTimer.start(16);
     }
 private:
-    QAbstractButton* button(const QString& name) {
+    QAbstractButton* button(const char* source) {
+        const auto name = QCoreApplication::translate("Kemu", source);
         for (auto* button : mRoot->findChildren<QAbstractButton*>())
             if (button->accessibleName() == name && button->isVisible()) return button;
         fail("Missing visible button: " + name);
@@ -137,10 +138,10 @@ private:
                     fail("Startup font did not resolve to Microsoft YaHei UI"); return;
                 }
                 mChecks.append("title/startup logos loaded; startup font resolved to Microsoft YaHei UI");
-                if (auto* b = button(QStringLiteral("最大化"))) b->click();
+                if (auto* b = button("Maximize")) b->click();
             } else if (mStage == 1) {
                 if (!mRoot->isMaximized()) { fail("Maximize state did not update"); return; }
-                if (auto* b = button(QStringLiteral("还原"))) b->click();
+                if (auto* b = button("Restore")) b->click();
             } else if (mStage == 2) {
                 if (mRoot->isMaximized() || mRoot->size() != mBefore) { fail("Restore geometry mismatch"); return; }
                 mRoot->resize(1189,762);
@@ -150,7 +151,7 @@ private:
             else if (mStage == 6) mRoot->resize(mBefore);
             else {
                 mRoot->screen()->grabWindow(mRoot->winId()).save(qEnvironmentVariable("KEMU_GUI_TEST_RESULTS") + ".png");
-                if (auto* b = button(QStringLiteral("最小化"))) b->click();
+                if (auto* b = button("Minimize")) b->click();
             }
             advance();
         } else if (mStage == 8) {
@@ -159,7 +160,7 @@ private:
             advance();
         } else if (mStage == 9) {
             if (!fitted()) return;
-            if (auto* b = button(QStringLiteral("Home"))) b->click();
+            if (auto* b = button("Home")) b->click();
             advance();
         } else if (mElapsed.elapsed() > 500) {
             if (mStage == 10) {
@@ -167,20 +168,20 @@ private:
                 if (!QRegularExpression("(?:mResumedActivity|topResumedActivity)[^\\n]*launcher", QRegularExpression::CaseInsensitiveOption).match(activity).hasMatch()) {
                     fail("Home did not resume launcher"); return;
                 }
-                if (auto* b = button(QStringLiteral("任务切换"))) b->click();
-            } else if (mStage == 11) { if (auto* b = button(QStringLiteral("返回"))) b->click(); }
-            else if (mStage == 12) { if (auto* b = button(QStringLiteral("音量＋"))) b->click(); }
-            else if (mStage == 13) { if (auto* b = button(QStringLiteral("音量－"))) b->click(); }
+                if (auto* b = button("Recent apps")) b->click();
+            } else if (mStage == 11) { if (auto* b = button("Back")) b->click(); }
+            else if (mStage == 12) { if (auto* b = button("Volume up")) b->click(); }
+            else if (mStage == 13) { if (auto* b = button("Volume down")) b->click(); }
             else if (mStage == 14) {
                 mMutedBefore = muted();
                 if (mMutedBefore.isEmpty()) { fail("Cannot observe Android mute state"); return; }
-                if (auto* b = button(QStringLiteral("静音／取消静音"))) b->click();
+                if (auto* b = button("Mute / Unmute")) b->click();
             } else if (mStage == 15) {
-                auto* b = button(QStringLiteral("静音／取消静音"));
+                auto* b = button("Mute / Unmute");
                 if (!b || !b->isEnabled() || muted() == mMutedBefore) return;
                 b->click();
             } else if (mStage == 16) {
-                auto* b = button(QStringLiteral("静音／取消静音"));
+                auto* b = button("Mute / Unmute");
                 if (!b || !b->isEnabled() || muted() != mMutedBefore) return;
                 if (!mMuteApp.isEmpty()) {
                     mChecks.append("Sidebar mute button toggled and restored Android media mute");

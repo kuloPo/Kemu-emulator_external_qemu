@@ -204,7 +204,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int) {
         const int size = MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0);
         std::wstring detail(size, L'\0');
         MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), detail.data(), size);
-        MessageBoxW(nullptr, (L"暂时无法启动 Kemu\n\n" + detail).c_str(), L"Kemu", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, (L"Unable to start Kemu\n\n" + detail).c_str(), L"Kemu", MB_OK | MB_ICONERROR);
         return 1;
     }
 }
