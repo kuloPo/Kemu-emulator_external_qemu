@@ -10,6 +10,7 @@
 // GNU General Public License for more details.
 
 #include "aemu/base/async/ThreadLooper.h"
+#include "android/emulation/AdbHostScreencap.h"
 #include "android/emulation/AdbHub.h"
 #include "android/emulation/AdbMessageSniffer.h"
 #include "android/emulation/AdbVsockPipe.h"
@@ -68,9 +69,15 @@ namespace emulation {
 namespace {
 
 struct VsockAdbProxy : public AdbVsockPipe::Proxy {
-    VsockAdbProxy(const int snifferLogLevel)
+    // |wantWrite| asks for the host socket to be watched for writing. It is
+    // used for data that does not come in through onGuestSend().
+    VsockAdbProxy(const int snifferLogLevel, std::function<void()> wantWrite)
         : mReceivedMesg(AdbMessageSniffer::create("HOST==>GUEST",  snifferLogLevel))
         , mSendingMesg(AdbMessageSniffer::create("HOST<==GUEST",  snifferLogLevel))
+        , mWantWrite(std::move(wantWrite))
+        , mScreencap([this](const char* data, size_t size) { sendToGuest(data, size); },
+                     [this](const char* data, size_t size) { sendToHost(data, size); },
+                     &AdbHostScreencap::serve)
     {}
 
     AdbPortType portType() const override { return AdbPortType::RegularAdb; }
@@ -99,7 +106,11 @@ struct VsockAdbProxy : public AdbVsockPipe::Proxy {
                 // Some arbitrary large enough (64M) buffer size.
                 constexpr size_t kLargeBuffer = size_t(64) << 20;
 
-                const size_t bufSize = (*g_vsock_ops->send)(guestKey, buf, received);
+                mGuestKey = guestKey;
+                // Stays as it is if none of the data is for the guest.
+                mGuestBufferSize = 1;
+                mScreencap.onHostData(buf, received);
+                const size_t bufSize = mGuestBufferSize;
                 if (bufSize >= kLargeBuffer) {
                     // A hacky flow control (b/452843321) to prevent unbounded buffer growth.
                     // This callback is level-sensitive: the remaining of the data will
@@ -146,9 +157,24 @@ struct VsockAdbProxy : public AdbVsockPipe::Proxy {
     }
 
     EventBits onGuestSend(const void *data, size_t size) override {
-        std::lock_guard<std::mutex> guard(mGuestToHostMutex);
-        mGuestToHost.append(data, size);
+        mInGuestSend = true;
+        mScreencap.onGuestData(static_cast<const char*>(data), size);
+        mInGuestSend = false;
         return EventBits::WantWrite;
+    }
+
+    void sendToGuest(const char* data, size_t size) {
+        mGuestBufferSize = (*g_vsock_ops->send)(mGuestKey, data, size);
+    }
+
+    void sendToHost(const char* data, size_t size) {
+        {
+            std::lock_guard<std::mutex> guard(mGuestToHostMutex);
+            mGuestToHost.append(data, size);
+        }
+        if (!mInGuestSend) {
+            mWantWrite();
+        }
     }
 
     void logToAdbSniffer(AdbMessageSniffer* sniffer, const void* data, size_t size) {
@@ -166,6 +192,11 @@ struct VsockAdbProxy : public AdbVsockPipe::Proxy {
     const std::unique_ptr<AdbMessageSniffer> mReceivedMesg;
     const std::unique_ptr<AdbMessageSniffer> mSendingMesg;
     mutable std::mutex mGuestToHostMutex;
+    const std::function<void()> mWantWrite;
+    uint64_t mGuestKey = 0;
+    size_t mGuestBufferSize = 0;
+    bool mInGuestSend = false;
+    AdbHostScreencap mScreencap;
 };
 
 struct VsockJdwpProxy : public AdbVsockPipe::Proxy {
@@ -509,7 +540,9 @@ AdbVsockPipe::AdbVsockPipe(AdbVsockPipe::Service *service,
 
     switch (portType) {
     case AdbPortType::RegularAdb:
-        mProxy = std::make_unique<VsockAdbProxy>(getConsoleAgents()->settings->hw()->test_monitorAdb);
+        mProxy = std::make_unique<VsockAdbProxy>(
+                getConsoleAgents()->settings->hw()->test_monitorAdb,
+                [this] { processProxyEventBits(Proxy::EventBits::WantWrite); });
         break;
 
     case AdbPortType::Jdwp:
@@ -531,6 +564,8 @@ AdbVsockPipe::~AdbVsockPipe() {
         mSocketWatcher->dontWantRead();
         mSocketWatcher.reset();  // run ~FdWatch under BQL
     }
+    // The proxy can be waiting for a reply that is delivered under the BQL.
+    mProxy.reset();
 }
 
 std::unique_ptr<AdbVsockPipe> AdbVsockPipe::create(AdbVsockPipe::Service *service,

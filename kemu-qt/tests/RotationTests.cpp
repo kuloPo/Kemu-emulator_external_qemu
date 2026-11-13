@@ -192,9 +192,13 @@ int main(int argc, char** argv) {
         checkMultipleMonitorResize();
         kemu::RotationEvents events;
         std::vector<int> received;
+        std::vector<kemu::RotationEvents::Display> displays;
         const auto feed = [&](const std::string& bytes) {
-            for (char ch : bytes)
-                if (const auto rotation = events.accept(ch)) received.push_back(*rotation);
+            for (char ch : bytes) {
+                const auto event = events.accept(ch);
+                if (event.rotation) received.push_back(*event.rotation);
+                if (event.display) displays.push_back(*event.display);
+            }
         };
         feed("KEMU_ROTATION_V1 ");
         require(received.empty(), "Partial event was accepted");
@@ -207,6 +211,20 @@ int main(int argc, char** argv) {
         events = kemu::RotationEvents();
         feed("KEMU_ROTATION_V1 0\n");
         require(received.size() == 6, "Reconnection did not publish the initial rotation");
+        require(displays.empty(), "Rotation events reported a display");
+        feed("KEMU_DISPLAY_V1 0 1920 1080\nKEMU_DISPLAY_V1 0 1920 1080\nKEMU_DISPLAY_V1 1 1080 1920\r\n");
+        feed("KEMU_DISPLAY_V1 4 1080 1920\nKEMU_DISPLAY_V1 1 0 1920\nKEMU_DISPLAY_V1 1 01080 1920\n");
+        feed("KEMU_DISPLAY_V1 1 1080 1920 \nKEMU_DISPLAY_V1 1 1080\nKEMU_DISPLAY_V1 1  1080 1920\n");
+        feed("KEMU_DISPLAY_V1 1 108000 1920\nKEMU_DISPLAY_V1 -1 1080 1920\nKEMU_DISPLAY_V2 2 1920 1080\n");
+        feed(std::string(10000, 'x') + "KEMU_DISPLAY_V1 2 1920 1080\n");
+        feed("KEMU_DISPLAY_V1 2 1280 720\n");
+        require(received.size() == 6, "A display event changed the rotation");
+        require(displays == std::vector<kemu::RotationEvents::Display>(
+                    {{0, 1920, 1080}, {1, 1080, 1920}, {2, 1280, 720}}),
+                "Display events were lost, duplicated or malformed");
+        events = kemu::RotationEvents();
+        feed("KEMU_DISPLAY_V1 2 1280 720\n");
+        require(displays.size() == 4, "Reconnection did not publish the initial display");
         for (const auto screen : {QSize(1920,1040), QSize(1280,720), QSize(960,540)}) {
             const auto portrait = kemu::windowSizing(QSize(1080,1920), screen);
             require(portrait.initial.width() < portrait.initial.height(), "Portrait window is not upright");
@@ -215,7 +233,7 @@ int main(int argc, char** argv) {
             require(portrait.minimum.width() <= portrait.initial.width() && portrait.minimum.height() <= portrait.initial.height(),
                     "Window minimum prevents portrait rotation");
         }
-        std::cout << "Display rotation and window sizing checks passed\n";
+        std::cout << "Display state and window sizing checks passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

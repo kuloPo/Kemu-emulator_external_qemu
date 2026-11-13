@@ -30,6 +30,7 @@ add_custom_command(OUTPUT "${KEMU_ROTATION_HEADER}"
         --d8 "${KEMU_ROTATION_D8}" --android-jar "${KEMU_ROTATION_ANDROID_JAR}"
         --output "${KEMU_ROTATION_HEADER}"
     DEPENDS build.py RotationObserver.java IRotationWatcher.java
+        IDisplayWindowListener.java
         "${KEMU_ROTATION_JAVA}" "${KEMU_ROTATION_JAVAC}"
         "${KEMU_ROTATION_D8}" "${KEMU_ROTATION_ANDROID_JAR}"
     VERBATIM)

@@ -64,6 +64,7 @@ set(android-emu-common
     android/emulation/AdbDebugPipe.cpp
     android/emulation/AdbGuestPipe.cpp
     android/emulation/AdbHostListener.cpp
+    android/emulation/AdbHostScreencap.cpp
     android/emulation/AdbHub.cpp
     android/emulation/AdbMessageSniffer.cpp
     android/emulation/AdbVsockPipe.cpp
@@ -654,6 +655,7 @@ if(NOT LINUX_AARCH64)
       android/emulation/AdbDebugPipe_unittest.cpp
       android/emulation/AdbGuestPipe_unittest.cpp
       android/emulation/AdbHostListener_unittest.cpp
+      android/emulation/AdbHostScreencap_unittest.cpp
       android/emulation/AdbHostServer_unittest.cpp
       android/emulation/AdbHub_unittest.cpp
       android/emulation/AdbMessageSniffer_unittest.cpp

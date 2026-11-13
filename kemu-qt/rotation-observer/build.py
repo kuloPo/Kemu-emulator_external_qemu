@@ -23,8 +23,9 @@ def main():
         subprocess.run([args.javac, "-source", "8", "-target", "8", "-Xlint:-options",
                         "-classpath", args.android_jar, "-d", str(classes),
                         str(source / "IRotationWatcher.java"),
+                        str(source / "IDisplayWindowListener.java"),
                         str(source / "RotationObserver.java")], check=True)
-        # Exclude the compile-time android.view stub from the deployed dex.
+        # Exclude the compile-time android.view stubs from the deployed dex.
         application_classes = sorted((classes / "org").rglob("*.class"))
         subprocess.run([args.java, "-cp", args.d8, "com.android.tools.r8.D8",
                         "--min-api", "26", "--lib", args.android_jar,

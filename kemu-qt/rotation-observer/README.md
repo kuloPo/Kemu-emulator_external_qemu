@@ -12,6 +12,19 @@ Values 0 through 3 are Android's display rotations. The host applies the inverse
 skin transform. The observer follows application orientation requests without
 changing the device's sensors or rotation settings.
 
+The helper also registers an `IDisplayWindowListener` with the window manager and
+reports the rotation and logical size of display 0 whenever its configuration
+changes, including size overrides such as `wm size`:
+
+```
+KEMU_DISPLAY_V1 0 1920 1080
+```
+
+The host publishes this state to `AdbHostScreencap`, which answers screenshot
+requests from the host's copy of the display only while the state is known and
+matches that copy. The state is withdrawn when the stream ends. Rotation
+reporting does not depend on the display listener.
+
 The stream stays open while the GUI is active. Closing its stdin terminates the
 helper and releases the Binder subscription. A window-service death also ends
 the helper. The host cancels startup after five seconds without an initial
@@ -22,8 +35,9 @@ a valid event. Successful subscriptions have no periodic polling or timeout.
 
 CMake compiles the helper from source using the existing prebuilt JDK 17,
 Android 36 API jar, and D8 36.1.0, then embeds the resulting dex in the GUI.
-`IRotationWatcher.java` only supplies compile-time declarations; its classes
-are excluded from the dex so Android supplies the real Binder implementation.
+`IRotationWatcher.java` and `IDisplayWindowListener.java` only supply
+compile-time declarations; their classes are excluded from the dex so Android
+supplies the real Binder implementations.
 No APK installation, Android image change, or external `adb.exe` is required
 for rotation detection.
 
@@ -36,7 +50,8 @@ it atomically and read-only. Separate caches support ADB root/unroot transitions
 ## Validation
 
 Build and run `kemu-rotation-tests` for fragmented events, duplicate suppression,
-malformed or oversized lines, reconnection state, and window sizing.
+malformed or oversized lines, display state, reconnection state, and window
+sizing.
 
 For live rotation and touch-coordinate checks, build with `KEMU_GUI_TESTS=ON`,
 install the APK built by `../tests/rotation-probe/build.ps1`, and launch Kemu with

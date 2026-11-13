@@ -7,10 +7,12 @@
 #include <chrono>
 #include <mutex>
 #include <string>
+#include "android/emulation/AdbHostScreencap.h"
 #include "android/emulation/control/adb/AdbConnection.h"
 
 namespace kemu {
 using android::emulation::AdbConnection;
+using android::emulation::AdbHostScreencap;
 using android::emulation::AdbStream;
 using namespace std::chrono_literals;
 
@@ -101,7 +103,12 @@ void AndroidRotation::listen() {
         RotationEvents events;
         char ch;
         while (stream->read(&ch, 1)) {
-            if (const auto rotation = events.accept(ch)) {
+            const auto event = events.accept(ch);
+            if (const auto display = event.display) {
+                AdbHostScreencap::setGuestDisplay(
+                    AdbHostScreencap::GuestDisplay{display->rotation, display->width, display->height});
+            }
+            if (const auto rotation = event.rotation) {
                 QMetaObject::invokeMethod(this, [this, request, rotation] {
                     if (!mActive || mRequest != request) return;
                     {
@@ -115,6 +122,8 @@ void AndroidRotation::listen() {
             }
         }
         stream->close();
+        // The display state is only current while the observer runs.
+        AdbHostScreencap::setGuestDisplay(std::nullopt);
     });
     connect(mThread, &QThread::finished, this, [this] {
         mDeadline.stop();
