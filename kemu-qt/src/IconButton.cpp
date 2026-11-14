@@ -58,6 +58,11 @@ void IconButton::paintEvent(QPaintEvent*) {
         p.drawArc(QRectF(1.5, 1.5, 21, 21), 205 * 16, 115 * 16);
         p.drawPolyline(QPolygonF{QPointF(6, 19), QPointF(2, 16.5), QPointF(1.5, 21)});
         break;
+    case Icon::InstallApk:
+        p.drawLine(QPointF(12, 3), QPointF(12, 14));
+        p.drawPolyline(QPolygonF{QPointF(7, 9), QPointF(12, 14), QPointF(17, 9)});
+        p.drawPolyline(QPolygonF{QPointF(4, 14), QPointF(4, 20), QPointF(20, 20), QPointF(20, 14)});
+        break;
     case Icon::Settings: {
         QPainterPath gear;
         for (int tooth = 0; tooth < 8; ++tooth) {

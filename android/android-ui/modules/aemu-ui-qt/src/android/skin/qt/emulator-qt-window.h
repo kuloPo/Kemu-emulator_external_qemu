@@ -149,6 +149,7 @@ public:
     void focusInEvent(QFocusEvent *event) override;
     void startThread(StartFunction f, int argc, char** argv);
     void stopThread();
+    void runAdbInstall(const QString& path);
 
     // In Qt, signals are normally events of interest that a class can emit,
     // which can be hooked up to arbitrary slots. Here we use this mechanism for
@@ -495,7 +496,6 @@ private:
     bool hasFrame() const;
     bool hasSkin() const;
 
-    void runAdbInstall(const QString& path);
     void installDone(android::emulation::ApkInstaller::Result result,
                      std::string_view errorString);
 

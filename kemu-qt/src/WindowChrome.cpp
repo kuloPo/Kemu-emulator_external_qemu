@@ -15,6 +15,7 @@
 #include <QAccessibleWidget>
 #include <QBoxLayout>
 #include <QFile>
+#include <QFileDialog>
 #include <QFont>
 #include <QFontInfo>
 #include <QIcon>
@@ -180,7 +181,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         });
         side->addWidget(button);
         mButtons.append(button);
-        if (spec.icon == Icon::Mute) {
+        if (spec.icon == Icon::Mute || spec.icon == Icon::Recents) {
             auto* separator = new QWidget(mSidebar);
             separator->setFixedHeight(1);
             separator->setStyleSheet("background: #303743;");
@@ -202,6 +203,21 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     });
     side->addWidget(mRotate);
     mButtons.append(mRotate);
+    auto* installApk = new IconButton(Icon::InstallApk,
+        QCoreApplication::translate("Kemu", "Install APK"), mSidebar);
+    installApk->setObjectName("KemuInstallApk");
+    installApk->setProperty("kemuLabel", QT_TRANSLATE_NOOP("Kemu", "Install APK"));
+    installApk->setEnabled(false);
+    connect(installApk, &QAbstractButton::clicked, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(mContainer,
+            QCoreApplication::translate("Kemu", "Install APK"), {},
+            QCoreApplication::translate("Kemu", "Android packages (*.apk)"));
+        if (mClosing) return;
+        mDisplay->setFocus(Qt::OtherFocusReason);
+        if (!path.isEmpty()) mDisplay->runAdbInstall(path);
+    });
+    side->addWidget(installApk);
+    mButtons.append(installApk);
     side->addStretch();
 #ifdef _WIN32
     mUpdates = new UpdateController(container,

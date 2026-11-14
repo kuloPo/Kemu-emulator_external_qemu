@@ -4,6 +4,14 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>Install APK</source>
+        <translation>安装 APK</translation>
+    </message>
+    <message>
+        <source>Android packages (*.apk)</source>
+        <translation>安卓安装包 (*.apk)</translation>
+    </message>
+    <message>
         <source>Licenses and trademarks</source>
         <translation>开源许可与商标</translation>
     </message>
