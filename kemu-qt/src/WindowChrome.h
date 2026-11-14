@@ -37,6 +37,9 @@ public:
 private:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void toggleMaximized();
+    void toggleFullScreen();
+    void updateFullScreenChrome();
+    void raiseChrome();
     void requestResize();
     void pollBoot();
     void rotateDevice();
@@ -58,6 +61,7 @@ private:
     QLabel* mFrameRate = nullptr;
     std::unique_ptr<FrameRateMonitor> mFrameRateMonitor;
     IconButton* mMaximize = nullptr;
+    IconButton* mFullScreenButton = nullptr;
     IconButton* mRotate = nullptr;
     AndroidMute* mMute = nullptr;
     AndroidRotation* mRotation = nullptr;
@@ -68,6 +72,9 @@ private:
     QVector<QMetaObject::Connection> mScreenConnections;
     QTimer mBootPoll;
     QTimer mFrameRatePoll;
+    QTimer mFullScreenPoll;
+    QTimer mTitleHide;
+    QTimer mSidebarHide;
     QSize mRequestedSize;
     QSize mNormalSizes[2];
     QSize mPendingWindowSize;
@@ -82,6 +89,8 @@ private:
     bool mReady = false;
     bool mClosing = false;
     bool mAdbChecked = false;
+    bool mFullScreen = false;
+    bool mRestoreMaximized = false;
     QString mAdbPath;
     void* mInstanceHandle = nullptr;
 };

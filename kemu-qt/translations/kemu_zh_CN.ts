@@ -184,6 +184,14 @@ Add ADB to PATH, or place adb.exe and its DLLs in platform-tools next to Kemu.ex
         <translation>最小化</translation>
     </message>
     <message>
+        <source>Full screen (F11)</source>
+        <translation>全屏 (F11)</translation>
+    </message>
+    <message>
+        <source>Exit full screen (F11)</source>
+        <translation>退出全屏 (F11)</translation>
+    </message>
+    <message>
         <location filename="../src/WindowChrome.cpp" line="123"/>
         <location filename="../src/WindowChrome.cpp" line="142"/>
         <source>Mute / Unmute</source>

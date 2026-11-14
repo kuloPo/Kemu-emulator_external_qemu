@@ -52,6 +52,7 @@ option(KEMU_GUI_TESTS "Include opt-in live VM UI checks" OFF)
 if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
     target_sources(aemu-ui-qt PRIVATE ${CMAKE_CURRENT_LIST_DIR}/tests/LiveGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/FontGuiChecks.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/tests/FullScreenGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/AffinityGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/RotationGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/ResizeGuiChecks.cpp

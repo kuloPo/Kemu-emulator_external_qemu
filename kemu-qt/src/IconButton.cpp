@@ -75,6 +75,19 @@ void IconButton::paintEvent(QPaintEvent*) {
         }
         gear.closeSubpath(); p.drawPath(gear); p.drawEllipse(QRectF(9, 9, 6, 6)); break;
     }
+    case Icon::FullScreen:
+    case Icon::ExitFullScreen:
+        for (int corner = 0; corner < 4; ++corner) {
+            p.save();
+            p.translate(12, 12);
+            p.rotate(corner * 90);
+            if (m_icon == Icon::FullScreen)
+                p.drawPolyline(QPolygonF{QPointF(-3, -8), QPointF(-8, -8), QPointF(-8, -3)});
+            else
+                p.drawPolyline(QPolygonF{QPointF(-8, -3), QPointF(-3, -3), QPointF(-3, -8)});
+            p.restore();
+        }
+        break;
     case Icon::Minimize: p.drawLine(QPointF(7, 12), QPointF(17, 12)); break;
     case Icon::Maximize: p.drawRect(QRectF(7, 7, 10, 10)); break;
     case Icon::Restore: p.drawRect(QRectF(6, 9, 9, 9)); p.drawPolyline(QPolygonF{QPointF(9, 6), QPointF(18, 6), QPointF(18, 15)}); break;

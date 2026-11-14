@@ -14,6 +14,7 @@
 #include <QApplication>
 #include <QAccessibleWidget>
 #include <QBoxLayout>
+#include <QCursor>
 #include <QFile>
 #include <QFileDialog>
 #include <QFont>
@@ -21,6 +22,7 @@
 #include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QMessageBox>
@@ -67,6 +69,7 @@ private:
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startFontGuiChecks(EmulatorContainer*);
+void startFullScreenGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startAffinityGuiChecks(EmulatorContainer*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startResizeGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
@@ -110,7 +113,8 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     container->viewport()->setStyleSheet("background: #0c0e12;");
     mTitle = new QWidget(container);
     mTitle->setObjectName("KemuTitleBar");
-    mTitle->installEventFilter(this);
+    mTitle->setAttribute(Qt::WA_NativeWindow);
+    mTitle->setStyleSheet("#KemuTitleBar { background: #15191f; }");
     auto* title = new QHBoxLayout(mTitle);
     title->setContentsMargins(16, 0, 4, 0);
     title->setSpacing(4);
@@ -126,6 +130,16 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     brand->setStyleSheet("color: #eef3fa;");
     title->addWidget(brand);
     title->addStretch();
+    mFullScreenButton = new IconButton(Icon::FullScreen,
+        QCoreApplication::translate("Kemu", "Full screen (F11)"), mTitle);
+    mFullScreenButton->setObjectName("KemuFullScreen");
+    title->addWidget(mFullScreenButton);
+    auto* separator = new QWidget(mTitle);
+    separator->setObjectName("KemuFullScreenSeparator");
+    separator->setFixedSize(1, 20);
+    separator->setStyleSheet("background: #303743;");
+    title->addWidget(separator);
+    connect(mFullScreenButton, &QAbstractButton::clicked, this, &WindowChrome::toggleFullScreen);
     auto* minimize = new IconButton(Icon::Minimize, QCoreApplication::translate("Kemu", "Minimize"), mTitle);
     mMaximize = new IconButton(Icon::Maximize, QCoreApplication::translate("Kemu", "Maximize"), mTitle);
     auto* close = new IconButton(Icon::Close, QCoreApplication::translate("Kemu", "Close"), mTitle);
@@ -145,6 +159,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mMute = new AndroidMute(this);
     mRotation = new AndroidRotation(this);
     mSidebar->setObjectName("KemuSidebar");
+    mSidebar->setAttribute(Qt::WA_NativeWindow);
     mSidebar->setStyleSheet("#KemuSidebar { background: #1b2028; }");
     auto* side = new QVBoxLayout(mSidebar);
     side->setContentsMargins(6, 10, 6, 10);
@@ -257,7 +272,16 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mFrameRate->setFont(uiFont(10, QFont::DemiBold));
     mFrameRate->hide();
     connect(&mFrameRatePoll, &QTimer::timeout, this, &WindowChrome::updateFrameRate);
-    display->installEventFilter(this);
+    // Observe F11 before the focused child can forward it to Android.
+    qApp->installEventFilter(this);
+    mFullScreenPoll.setInterval(50);
+    connect(&mFullScreenPoll, &QTimer::timeout, this, &WindowChrome::updateFullScreenChrome);
+    for (auto* timer : {&mTitleHide, &mSidebarHide}) {
+        timer->setSingleShot(true);
+        timer->setInterval(500);
+    }
+    connect(&mTitleHide, &QTimer::timeout, mTitle, &QWidget::hide);
+    connect(&mSidebarHide, &QTimer::timeout, mSidebar, &QWidget::hide);
 #ifdef _WIN32
     mUpdates->showFrameRateChanged = [this](bool show) { setShowFrameRate(show); };
 #endif
@@ -348,11 +372,12 @@ WindowChrome::~WindowChrome() {
 void WindowChrome::layout() {
     if (mLayoutActive) return;
     mLayoutActive = true;
-    mContainer->setViewportMargins(1, 41, 53, 1);
+    mContainer->setViewportMargins(mFullScreen ? QMargins() : QMargins(1, 41, 53, 1));
     const int width = mContainer->width(), height = mContainer->height();
-    mTitle->setGeometry(1, 1, width - 2, 40);
-    mSidebar->setGeometry(width - 53, 41, 52, qMax(0, height - 42));
-    mLoading->setGeometry(1, 41, qMax(0, width - 54), qMax(0, height - 42));
+    const int border = mFullScreen ? 0 : 1;
+    mTitle->setGeometry(border, border, width - 2 * border, 40);
+    mSidebar->setGeometry(width - 52 - border, 40 + border, 52, qMax(0, height - 40 - 2 * border));
+    mLoading->setGeometry(mContainer->viewport()->geometry());
     if (!mReady || mClosing) mLoading->raise();
     layoutFrameRate();
     mLayoutActive = false;
@@ -482,6 +507,50 @@ void WindowChrome::layoutFrameRate() {
     }
     mFrameRate->setVisible(visible);
     if (visible) mFrameRate->raise();
+    raiseChrome();
+}
+
+void WindowChrome::raiseChrome() {
+    // Native siblings must stay above the renderer's native child window.
+    if (mSidebar->isVisible()) mSidebar->raise();
+    if (mTitle->isVisible()) mTitle->raise();
+}
+
+void WindowChrome::updateFullScreenChrome() {
+    if (!mFullScreen || mClosing) return;
+    if (!mContainer->isActiveWindow() || mContainer->isMinimized()) {
+        mTitleHide.stop();
+        mSidebarHide.stop();
+        mTitle->hide();
+        mSidebar->hide();
+        return;
+    }
+    // The GPU child consumes mouse moves, so sample the cursor while full screen.
+#ifdef _WIN32
+    const HWND window = reinterpret_cast<HWND>(mContainer->winId());
+    POINT pixel{};
+    RECT bounds{};
+    if (!GetCursorPos(&pixel) || !ScreenToClient(window, &pixel) || !GetClientRect(window, &bounds)) return;
+    const bool inside = PtInRect(&bounds, pixel);
+    // Keep subpixel coordinates: at high DPI, rounding the last physical pixel
+    // to an integer logical position can put it outside the right/bottom edge.
+    const qreal dpr = mContainer->devicePixelRatioF();
+    const QPointF cursor(pixel.x / dpr, pixel.y / dpr);
+#else
+    const QPointF cursor = mContainer->mapFromGlobal(QCursor::pos());
+    const bool inside = mContainer->rect().contains(cursor.toPoint());
+#endif
+    const auto reveal = [inside, cursor](QWidget* bar, QTimer& hide, bool edge) {
+        if (inside && (edge || (bar->isVisible() && QRectF(bar->geometry()).adjusted(-8, -8, 8, 8).contains(cursor)))) {
+            hide.stop();
+            bar->show();
+        } else if (bar->isVisible() && !hide.isActive() && !QApplication::mouseButtons()) {
+            hide.start();
+        }
+    };
+    reveal(mTitle, mTitleHide, cursor.y() < 8);
+    reveal(mSidebar, mSidebarHide, cursor.x() >= mContainer->width() - 8);
+    raiseChrome();
 }
 
 void WindowChrome::pollBoot() {
@@ -502,6 +571,7 @@ void WindowChrome::pollBoot() {
     });
 #ifdef KEMU_GUI_TESTS
     if (qEnvironmentVariableIsSet("KEMU_FONT_TEST_RESULTS")) startFontGuiChecks(mContainer);
+    if (qEnvironmentVariableIsSet("KEMU_FULLSCREEN_TEST_RESULTS")) startFullScreenGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_ROTATION_TEST_RESULTS")) startRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_RESIZE_TEST_RESULTS")) startResizeGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_SENSOR_ROTATION_TEST_RESULTS")) startSensorRotationGuiChecks(mContainer, mDisplay);
@@ -556,6 +626,8 @@ void WindowChrome::checkAdb() {
 }
 
 void WindowChrome::updateWindowState() {
+    // Restore viewport margins before applying a rotation deferred in full screen.
+    layout();
     applyPendingWindowSize();
     if (mDisplayRecoveryPending) mDisplayRecovery.start();
     const bool maximized = mContainer->isMaximized();
@@ -563,7 +635,13 @@ void WindowChrome::updateWindowState() {
     const QString label = maximized ? QCoreApplication::translate("Kemu", "Restore") : QCoreApplication::translate("Kemu", "Maximize");
     mMaximize->setToolTip(label);
     mMaximize->setAccessibleName(label);
-    layout();
+    mMaximize->setEnabled(!mFullScreen);
+    mFullScreenButton->setIconType(mFullScreen ? Icon::ExitFullScreen : Icon::FullScreen);
+    const QString fullScreenLabel = mFullScreen
+        ? QCoreApplication::translate("Kemu", "Exit full screen (F11)")
+        : QCoreApplication::translate("Kemu", "Full screen (F11)");
+    mFullScreenButton->setToolTip(fullScreenLabel);
+    mFullScreenButton->setAccessibleName(fullScreenLabel);
 }
 
 void WindowChrome::applyPendingWindowSize() {
@@ -584,16 +662,53 @@ void WindowChrome::applyPendingWindowSize() {
 }
 
 void WindowChrome::toggleMaximized() {
+    if (mFullScreen) return;
     if (mContainer->isMaximized()) mContainer->showNormal();
     else mContainer->showMaximized();
     updateWindowState();
 }
 
+void WindowChrome::toggleFullScreen() {
+    if (mClosing) return;
+    // Qt also reports full screen for maximized frameless windows on monitors
+    // with no reserved taskbar area. Track the user's mode independently.
+    if (!mFullScreen) {
+        mRestoreMaximized = mContainer->isMaximized();
+        if (mContainer->isFullScreen()) mContainer->showNormal();
+    }
+    mFullScreen = !mFullScreen;
+    mTitleHide.stop();
+    mSidebarHide.stop();
+    mTitle->setVisible(!mFullScreen);
+    mSidebar->setVisible(!mFullScreen);
+    if (mFullScreen) {
+        mFullScreenPoll.start();
+        mContainer->showFullScreen();
+    } else {
+        mFullScreenPoll.stop();
+        if (mRestoreMaximized) mContainer->showMaximized();
+        else mContainer->showNormal();
+    }
+    updateWindowState();
+    mDisplay->setFocus(Qt::OtherFocusReason);
+}
+
 bool WindowChrome::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress ||
+        event->type() == QEvent::KeyRelease) {
+        auto* widget = qobject_cast<QWidget*>(watched);
+        auto* key = static_cast<QKeyEvent*>(event);
+        if (widget && widget->window() == mContainer && key->key() == Qt::Key_F11 &&
+            key->modifiers() == Qt::NoModifier) {
+            if (event->type() == QEvent::KeyPress && !key->isAutoRepeat()) toggleFullScreen();
+            key->accept();
+            return true;
+        }
+    }
     if (watched == mDisplay && (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
         layoutFrameRate();
     }
-    if (watched == mTitle) {
+    if (watched == mTitle && !mFullScreen) {
         if (event->type() == QEvent::MouseButtonDblClick) {
             auto* mouse = static_cast<QMouseEvent*>(event);
             if (mouse->button() == Qt::LeftButton) {
@@ -622,6 +737,9 @@ void WindowChrome::beginClose() {
     mBootPoll.stop();
     mResize.stop();
     mDisplayRecovery.stop();
+    mFullScreenPoll.stop();
+    mTitleHide.stop();
+    mSidebarHide.stop();
     mMute->cancel();
     mRotation->stop();
     for (auto* button : mButtons) button->setEnabled(false);
@@ -646,7 +764,7 @@ bool WindowChrome::nativeEvent(void* message, qintptr* result) {
         mResizeStartSize = {};
         if (mDisplayRecoveryPending) mDisplayRecovery.start();
     }
-    if (msg->message == WM_SIZING && !IsZoomed(msg->hwnd) && !mContainer->isFullScreen()) {
+    if (msg->message == WM_SIZING && !IsZoomed(msg->hwnd) && !mFullScreen) {
         Qt::Edges edges;
         switch (msg->wParam) {
             case WMSZ_LEFT: edges = Qt::LeftEdge; break;
@@ -700,6 +818,7 @@ bool WindowChrome::nativeEvent(void* message, qintptr* result) {
         return true;
     }
     if (msg->message == WM_NCHITTEST) {
+        if (mFullScreen) { *result = HTCLIENT; return true; }
         POINT pixel{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
         ScreenToClient(msg->hwnd, &pixel);
         const QPoint point(qRound(pixel.x / mContainer->devicePixelRatioF()),
@@ -729,6 +848,8 @@ void WindowChrome::writeDiagnostics() {
     const auto rect = [](const QRect& r) { return QJsonObject{{"x",r.x()}, {"y",r.y()}, {"w",r.width()}, {"h",r.height()}}; };
     QJsonObject data{{"pid", qint64(QCoreApplication::applicationPid())}, {"qt", qVersion()},
         {"ready", mReady}, {"closing",mClosing}, {"maximized",mContainer->isMaximized()},
+        {"fullScreen",mFullScreen}, {"titleVisible",mTitle->isVisible()},
+        {"sidebarVisible",mSidebar->isVisible()},
         {"guestRotation",mGuestRotation}, {"surfacePortrait",mSurfacePortrait},
         {"maximizeTooltip",mMaximize->toolTip()}, {"window",rect(mContainer->geometry())},
         {"viewport",rect(viewport)}, {"surface",rect(surface)}, {"sidebar",rect(mSidebar->geometry())},
