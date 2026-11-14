@@ -20,28 +20,31 @@ static void checkReleaseDiscovery() {
         return Json{{"tag_name",tag},{"draft",draft},{"prerelease",prerelease}};
     };
     const Json releases = Json::array({release("v0.2.0"), release("v0.10.0"), release("v1.0.0-rc.2",true),
-        release("v9.0.0",false,true), release("v8.0.0",true), release("v7.0.0-beta"), release("../main")});
+        release("v9.0.0",false,true), release("v8.0.0-beta+build.7",true), release("v7.0.0-beta"), release("../main")});
     const Json history = {{"schema_version",1},{"releases",Json::array({
         {{"version","v0.1.0"},{"files",Json::array()}},{{"version","v0.10.0"},{"files",{"a.dll"}}},
-        {{"version","v8.0.0"},{"files",Json::array()}},{{"version","v99.0.0"},{"files",{"unpublished.dll"}}}})}};
+        {{"version","v8.0.0-beta+build.7"},{"files",Json::array()}},{{"version","v99.0.0"},{"files",{"unpublished.dll"}}}})}};
     for (const auto& current : {"v0.1.0", "v0.1.0-beta"}) {
-        const std::string target = std::string(current).find('-') == std::string::npos ? "v0.10.0" : "v8.0.0";
+        const std::string target = "v8.0.0-beta+build.7";
         std::vector<std::string> urls;
         const auto source = fetchUpdateSource(current, [&](const std::string& url) {
             urls.push_back(url); return urls.size() == 1 ? releases : history;
         });
-        check(source.target == target && source.history == history, "Published releases determine the target version");
+        check(source.target == target && source.history == history, "All installations select the highest published numeric version");
         check(urls == std::vector<std::string>{std::string(ApiReleasesUrl)+"?per_page=100&page=1",
               "https://raw.githubusercontent.com/kuloPo/Kemu/refs/tags/"+target+"/version-history.json"},
               "History must come from the selected release tag, not the default branch");
         const auto plan = resolve(source.history,current,source.target);
         check(plan.target == target && !plan.files.count("unpublished.dll"), "History cannot advance beyond the published target");
     }
-    for (const auto& available : {Json::array(), Json::array({release("v0.1.0"),release("v0.0.1")})}) {
-        int requests = 0;
-        const auto source = fetchUpdateSource("v0.1.0", [&](const std::string&) { ++requests; return available; });
-        check(requests == 1 && source.target == "v0.1.0" && resolve(source.history,"v0.1.0",source.target).releases.empty(),
-              "No newer release must avoid history downloads and downgrades");
+    for (const auto& current : {"v0.1.0", "v0.1.0-10-gabcdef", "v0.1.0+build.2"}) {
+        for (const auto& available : {Json::array(), Json::array({release("v0.1.0"),release("v0.0.1"),release("v0.1.0-rc.999",true)})}) {
+            int requests = 0;
+            const auto source = fetchUpdateSource(current, [&](const std::string&) { ++requests; return available; });
+            check(requests == 1 && source.target == current && resolve(source.history,current,source.target).releases.empty(),
+                  "Suffix changes must not trigger an update or a history download");
+            check(resolve(source.history,current,"v0.1.0-beta").target == current, "Equivalent targets must preserve the installed version");
+        }
     }
     int requests = 0;
     const auto paged = fetchUpdateSource("v0.1.0", [&](const std::string& url) {
@@ -58,7 +61,6 @@ static void checkReleaseDiscovery() {
     rejects([&] { fetchUpdateSource("v0.1.0", [](const std::string&) -> Json { throw NetworkError("Fixture network error"); }); });
     rejects([&] { resolve(history,"v0.1.0","v0.2.0"); });
     rejects([&] { resolve(history,"v0.1.0","v0.0.1"); });
-    rejects([&] { resolve(history,"v0.1.0","v1.0.0-beta"); });
 }
 static void checkDownloadCancellation(const fs::path& base) {
     for (const bool full : {false, true}) {
@@ -179,8 +181,10 @@ int main(int argc, char** argv) {
     try {
         checkReleaseDiscovery();
         check(compareVersions("v0.10.0", "v0.2.0") > 0, "Numeric version ordering");
-        check(compareVersions("v1.0.0-rc.2", "v1.0.0-rc.10") < 0, "Prerelease numeric ordering");
-        check(compareVersions("v1.0.0", "v1.0.0-rc.10") > 0, "Release ordering");
+        for (const auto& a : {"v1.2.3", "v1.2.3-rc.2", "v1.2.3-rc.10", "v1.2.3-10-gabcdef", "v1.2.3+build.7", "v1.2.3-beta+build.7"}) {
+            check(compareVersions(a,"v1.2.3") == 0 && compareVersions("v1.2.3",a) == 0, "Only the first three version numbers affect equality");
+            check(compareVersions(a,"v1.2.4-beta") < 0 && compareVersions(a,"v1.2.2+build.999") > 0, "Numeric patch ordering ignores suffixes");
+        }
         rejects([] { validateVersion("v01.2.3"); }); rejects([] { validateVersion("v0.1.0\nv0.2.0"); });
         for (const auto& path : {"../a", "a/../b", "C:/a", "/a", "a\\b", "nul.txt", "a:stream", "a.", ".kemu-update/payload", "a//b"}) rejects([&] { validatePath(path); });
         Json history = {{"schema_version",1},{"releases",Json::array({
@@ -195,6 +199,13 @@ int main(int argc, char** argv) {
         check(!plan.requiresFullInstaller, "Current empty release and future prerelease must not block updates");
         check(plan.releases.size() == 3 && plan.releases.front().version == "v0.1.1" && plan.releases.back().version == "v0.2.0",
               "Every incremental package must be downloaded in version order, including overwritten files");
+        auto suffixed = resolve(history,"v0.1.0-10-gabcdef","v0.2.0");
+        check(!suffixed.requiresFullInstaller && suffixed.releases.size() == plan.releases.size(),
+              "Installed suffixes must not hide a matching history version");
+        auto variants = history;
+        variants["releases"].push_back({{"version","v0.1.1-beta"},{"files",{"a.dll"}}});
+        check(resolve(variants,"v0.1.0","v0.2.0").requiresFullInstaller,
+              "Equal numeric versions in an update path require a full installer instead of an arbitrary delta order");
         auto major = history;
         major["releases"][3]["files"] = Json::array();
         check(resolve(major,"v0.1.0","v0.2.0").requiresFullInstaller, "Empty target requires full installer");

@@ -27,7 +27,7 @@ static std::vector<std::string> split(const std::string& s, char delimiter) {
     return result;
 }
 void validateVersion(const std::string& v) {
-    require(std::regex_match(v, std::regex("v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?")) && v.size() < 128,
+    require(std::regex_match(v, std::regex("v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)([-+][0-9A-Za-z]+([._+-][0-9A-Za-z]+)*)?")) && v.size() < 128,
             "Invalid version: " + v);
 }
 static int numeric(const std::string& a, const std::string& b) {
@@ -36,19 +36,13 @@ static int numeric(const std::string& a, const std::string& b) {
 }
 int compareVersions(const std::string& a, const std::string& b) {
     validateVersion(a); validateVersion(b);
-    auto ai = a.find('-'), bi = b.find('-');
-    auto ac = split(a.substr(1, ai == a.npos ? ai : ai - 1), '.');
-    auto bc = split(b.substr(1, bi == b.npos ? bi : bi - 1), '.');
-    for (int i = 0; i < 3; ++i) { int n = numeric(ac[i], bc[i]); if (n) return n; }
-    if (ai == a.npos || bi == b.npos) return ai == bi ? 0 : ai == a.npos ? 1 : -1;
-    auto ap = split(a.substr(ai + 1), '.'), bp = split(b.substr(bi + 1), '.');
-    for (size_t i = 0; i < std::min(ap.size(), bp.size()); ++i) {
-        bool an = ap[i].find_first_not_of("0123456789") == ap[i].npos;
-        bool bn = bp[i].find_first_not_of("0123456789") == bp[i].npos;
-        int n = an && bn ? numeric(ap[i], bp[i]) : an != bn ? (an ? -1 : 1) : ap[i] == bp[i] ? 0 : ap[i] < bp[i] ? -1 : 1;
+    auto ac = split(a.substr(1), '.'), bc = split(b.substr(1), '.');
+    for (int i = 0; i < 3; ++i) {
+        int n = numeric(ac[i].substr(0, ac[i].find_first_not_of("0123456789")),
+                        bc[i].substr(0, bc[i].find_first_not_of("0123456789")));
         if (n) return n;
     }
-    return ap.size() == bp.size() ? 0 : ap.size() < bp.size() ? -1 : 1;
+    return 0;
 }
 static std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); }); return s;
@@ -71,7 +65,6 @@ UpdateSource fetchUpdateSource(const std::string& current, const FetchJson& fetc
     if (current.empty()) throw VersionUnavailable();
     validateVersion(current);
     UpdateSource source{current, {{"schema_version", 1}, {"releases", Json::array()}}};
-    const bool prerelease = current.find('-') != current.npos;
     for (unsigned page = 1; ; ++page) {
         require(page <= 100, "Too many release pages");
         const auto releases = fetch(std::string(ApiReleasesUrl) + "?per_page=100&page=" + std::to_string(page));
@@ -80,7 +73,6 @@ UpdateSource fetchUpdateSource(const std::string& current, const FetchJson& fetc
             if (release.at("draft").get<bool>()) continue;
             const auto version = release.at("tag_name").get<std::string>();
             try { validateVersion(version); } catch (const std::runtime_error&) { continue; }
-            if (!prerelease && (release.at("prerelease").get<bool>() || version.find('-') != version.npos)) continue;
             if (compareVersions(version, source.target) > 0) source.target = version;
         }
         if (releases.size() < 100) break;
@@ -94,14 +86,13 @@ Plan resolve(const Json& history, const std::string& current, const std::string&
     validateVersion(current);
     validateVersion(target);
     require(compareVersions(target, current) >= 0, "Update target is older than the installed version");
-    require(current.find('-') != current.npos || target.find('-') == target.npos, "Stable installations cannot update to a prerelease");
     require(history.at("schema_version") == 1 && history.at("releases").is_array(), "Unsupported version history");
     std::vector<Release> releases; std::set<std::string> versions;
     bool found = false;
     for (const auto& item : history.at("releases")) {
         Release release; release.version = item.at("version").get<std::string>(); validateVersion(release.version);
         require(versions.insert(release.version).second, "Duplicate version history entry");
-        found |= release.version == current;
+        found |= compareVersions(release.version, current) == 0;
         release.files = item.at("files").get<std::vector<std::string>>();
         std::set<std::string> paths;
         for (const auto& path : release.files) {
@@ -112,13 +103,17 @@ Plan resolve(const Json& history, const std::string& current, const std::string&
         releases.push_back(std::move(release));
     }
     std::sort(releases.begin(), releases.end(), [](const Release& a, const Release& b) { return compareVersions(a.version, b.version) < 0; });
-    Plan plan; plan.current = current; plan.target = target;
-    require(target == current || versions.count(target), "Release version is missing from its version history");
+    Plan plan; plan.current = current; plan.target = compareVersions(target, current) == 0 ? current : target;
+    require(plan.target == current || versions.count(target), "Release version is missing from its version history");
     if (!found && plan.target != current) { plan.requiresFullInstaller = true; return plan; }
+    const Release* previous = nullptr;
     for (const auto& r : releases) {
-        if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0 && r.files.empty()) {
-            plan.requiresFullInstaller = true;
-            return plan;
+        if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0) {
+            if (r.files.empty() || (previous && compareVersions(previous->version, r.version) == 0)) {
+                plan.requiresFullInstaller = true;
+                return plan;
+            }
+            previous = &r;
         }
     }
     std::map<std::string, std::string> casing;

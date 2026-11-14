@@ -36,7 +36,7 @@ static kemu::update::FetchJson fixtureMetadata(std::function<kemu::update::Json(
             Json releases = Json::array();
             for (const auto& entry : cached.at("releases")) {
                 const auto version = entry.at("version").get<std::string>();
-                releases.push_back({{"tag_name",version},{"draft",false},{"prerelease",version.find('-') != version.npos}});
+                releases.push_back({{"tag_name",version},{"draft",false},{"prerelease",true}});
             }
             return releases;
         }
@@ -151,10 +151,10 @@ static void waitUntil(const std::function<bool()>& done, int timeout = 8000) {
     if (!done()) wait.exec();
     kemu::update::require(done(), "Update UI did not reach the expected state");
 }
-static void confirmDownload(QWidget& window, bool accept) {
+static void confirmDownload(QWidget& window, bool accept, const std::string& target) {
     waitUntil([&] { return window.findChild<QMessageBox*>("KemuConfirmDownload") != nullptr; });
     auto* prompt = window.findChild<QMessageBox*>("KemuConfirmDownload");
-    kemu::update::require(prompt->text() == QCoreApplication::translate("Kemu", "Version %1 is available. Download the update now?").arg("v0.10.0"),
+    kemu::update::require(prompt->text() == QCoreApplication::translate("Kemu", "Version %1 is available. Download the update now?").arg(QString::fromStdString(target)),
                           "Full and incremental updates must use the same download confirmation");
     for (auto* button : prompt->buttons()) {
         if (prompt->buttonRole(button) == (accept ? QMessageBox::AcceptRole : QMessageBox::RejectRole)) {
@@ -171,16 +171,18 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
             const fs::path root(temporary.path().toStdWString()), stage = root/".kemu-update";
             qputenv("KEMU_INSTALL_ROOT",temporary.path().toUtf8());
             qputenv("ANDROID_AVD_HOME",temporary.path().toUtf8());
-            writeText(root/"VERSION.txt","v0.1.0\n");
+            const std::string current = automatic ? "v0.1.0" : "v0.1.0-10-gabcdef";
+            writeText(root/"VERSION.txt",current+"\n");
+            const std::string target = automatic ? "v0.10.0-beta+build.7" : "v0.10.0";
             const Json history = {{"schema_version",1},{"releases",Json::array({
-                {{"version","v0.10.0"},{"files",{"a.dll"}}},
+                {{"version",target},{"files",{"a.dll"}}},
                 {{"version","v0.1.0"},{"files",Json::array()}},
                 {{"version","v0.2.0"},{"files",full ? Json::array() : Json::array({"a.dll"})}}
             })}};
-            const auto name = "Kemu-v0.10.0-Setup-x64.exe";
+            const auto name = "Kemu-" + target + "-Setup-x64.exe";
             writeText(root/"installer-fixture","installer payload");
-            const Json metadata = {{"tag_name","v0.10.0"},{"draft",false},{"assets",Json::array({{
-                {"name",name},{"browser_download_url",std::string(ReleasesUrl)+"/download/v0.10.0/"+name},
+            const Json metadata = {{"tag_name",target},{"draft",false},{"assets",Json::array({{
+                {"name",name},{"browser_download_url",std::string(ReleasesUrl)+"/download/"+target+"/"+name},
                 {"size",fs::file_size(root/"installer-fixture")},{"digest","sha256:"+sha256(root/"installer-fixture")}}})}};
             std::vector<std::string> transfers;
             bool corrupt = false;
@@ -212,13 +214,13 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                 require(dialog->findChild<QListWidget*>("KemuSettingsTabs")->currentRow()==2, "Startup must select the Updates page");
             }
             button->click();
-            confirmDownload(*window, false);
+            confirmDownload(*window, false, target);
             require(transfers.empty(), "Rejecting the download must not transfer any update packages");
             require(dialog->findChild<QLabel*>("KemuUpdateStatus")->text() ==
-                    QCoreApplication::translate("Kemu", "Version %1 is available. Click Check for updates to confirm the download.").arg("v0.10.0"),
+                    QCoreApplication::translate("Kemu", "Version %1 is available. Click Check for updates to confirm the download.").arg(QString::fromStdString(target)),
                     "Update availability must use a shared message without package counts");
             button->click();
-            confirmDownload(*window, true);
+            confirmDownload(*window, true, target);
             if (!automatic) {
                 // Delay UI completion delivery, then deliver a cancellation click queued at the boundary.
                 int waits = 0;
@@ -236,7 +238,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                 ? "The full installer has been downloaded and verified. Updating now will close the emulator and open the installer."
                 : "The update has been downloaded and verified. Updating now will close and restart the emulator."), "Wrong installation prompt");
             if (full) require(transfers.size()==2 && transfers.back().find(name)!=std::string::npos, "Full update must download only the latest installer");
-            else require(transfers.size()==2 && transfers[0].find("v0.2.0/")!=std::string::npos && transfers[1].find("v0.10.0/")!=std::string::npos,
+            else require(transfers.size()==2 && transfers[0].find("v0.2.0/")!=std::string::npos && transfers[1].find(target+"/")!=std::string::npos,
                          "Download every incremental package in numeric order, even when its files are overwritten");
             prompt->reject(); QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
             require(prompt.isNull() && fs::exists(stage/"downloaded.json") && !fs::exists(root/".kemu-update-pending"), "Later must retain the verified download");
@@ -256,7 +258,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                     cachedDialog->setAttribute(Qt::WA_DontShowOnScreen);
                     const auto before = transfers.size();
                     cachedDialog->findChild<QPushButton*>("KemuCheckUpdate")->click();
-                    confirmDownload(cacheWindow, true);
+                    confirmDownload(cacheWindow, true, target);
                     waitUntil([&] { return cacheWindow.findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
                     require(transfers.size() == before + 1 && transfers.back().find("api.github.com") != std::string::npos,
                             "A complete installer cache, including a .part file, must only re-fetch release metadata");
@@ -270,7 +272,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                     cachedDialog->setAttribute(Qt::WA_DontShowOnScreen);
                     auto* cachedButton = cachedDialog->findChild<QPushButton*>("KemuCheckUpdate");
                     const auto before = transfers.size();
-                    cachedButton->click(); confirmDownload(cacheWindow,true);
+                    cachedButton->click(); confirmDownload(cacheWindow,true,target);
                     waitUntil([&] { return cachedButton->isEnabled(); });
                     require(transfers.size() == before + 1 && !fs::exists(stage/"downloaded.json") && fs::exists(stage/name),
                             "A ready-record write failure must keep the installer and must not start another download");
@@ -284,17 +286,19 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                 auto* retryDialog = retryWindow.findChild<QDialog*>("KemuSettings"); retryDialog->setAttribute(Qt::WA_DontShowOnScreen);
                 auto* retryButton = retryDialog->findChild<QPushButton*>("KemuCheckUpdate");
                 retryButton->click();
-                confirmDownload(retryWindow, true);
+                confirmDownload(retryWindow, true, target);
                 waitUntil([&] { return retryButton->isEnabled() && retryDialog->isVisible(); });
                 require(!retryWindow.findChild<QMessageBox*>() && !fs::exists(stage/"downloaded.json"), "A corrupt installer must not be offered");
                 corrupt = false; retryButton->click();
-                confirmDownload(retryWindow, true);
+                confirmDownload(retryWindow, true, target);
                 waitUntil([&] { return retryWindow.findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
-                require(transfers.size()==4 && readJson(stage/"downloaded.json").at("from")=="v0.1.0", "A corrupt full installer must allow retry from a known version");
+                const auto downloaded = readJson(stage/"downloaded.json");
+                require(transfers.size()==4 && downloaded.at("from")==current && downloaded.at("to")==target,
+                        "A corrupt full installer must allow retry and preserve the complete version tags");
                 retryWindow.findChild<QMessageBox*>("KemuUpdateReady")->reject();
                 QCoreApplication::sendPostedEvents(nullptr,QEvent::DeferredDelete);
                 writeText(stage/name,"invalid cache"); pauseDownload = true;
-                retryButton->click(); confirmDownload(retryWindow, true); waitUntil([&] { return downloading.load(); });
+                retryButton->click(); confirmDownload(retryWindow, true, target); waitUntil([&] { return downloading.load(); });
                 retryDialog->findChild<QPushButton*>("KemuCancelUpdate")->click();
                 waitUntil([&] { return retryButton->isEnabled(); });
                 require(!fs::exists(stage/"downloaded.json") && !retryWindow.findChild<QMessageBox*>(), "Cancelled downloads must not be offered");
@@ -302,7 +306,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                         "Update cancelled. Downloaded files were kept; valid cached files will be reused when you retry.",
                         "Cancellation must explain that valid cached files can be reused");
                 pauseDownload = false; retryButton->click();
-                confirmDownload(retryWindow, true);
+                confirmDownload(retryWindow, true, target);
                 waitUntil([&] { return retryWindow.findChild<QMessageBox*>("KemuUpdateReady") != nullptr; });
                 require(fs::exists(stage/"downloaded.json"), "Cancelled downloads must allow a clean retry");
                 retry.stop();
