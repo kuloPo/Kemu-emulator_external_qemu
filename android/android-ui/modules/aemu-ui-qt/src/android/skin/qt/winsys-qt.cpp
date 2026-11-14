@@ -67,6 +67,8 @@
 #include "android/skin/rect.h"
 #include "android/skin/winsys.h"
 #include "android/ui-emu-agent.h"
+#include "UiFont.h"
+#include "WindowChrome.h"
 
 class QAction;
 class QCoreApplication;
@@ -854,6 +856,7 @@ extern void skin_winsys_start(bool no_window) {
         g->app->setAttribute(Qt::AA_CompressHighFrequencyEvents);
         g->app->setAttribute(Qt::AA_CompressTabletEvents);
         androidQtDefaultInit();
+        if (kemu::enabled()) kemu::initializeUiFonts();
 
         EmulatorQtWindow::create();
         EmulatorQtWindow::getInstance()->containerWindow()->initializeKemuUi();

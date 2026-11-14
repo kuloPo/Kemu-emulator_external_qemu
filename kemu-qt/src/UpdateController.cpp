@@ -193,7 +193,6 @@ UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb
             : QCoreApplication::translate("Kemu", "Check for updates to get the latest version."));
         if (languageChanged) languageChanged();
     });
-    applyUiFont(mDialog);
     brand->setFont(uiFont(22, QFont::DemiBold));
     refresh();
     QTimer::singleShot(2000, this, [this] { startup(); });
@@ -202,7 +201,7 @@ UpdateController::~UpdateController() { stop(); }
 bool UpdateController::eventFilter(QObject* watched, QEvent* event) {
     if (watched == mWindow && event->type() == QEvent::Close && mGrowingStorage) {
         static_cast<QCloseEvent*>(event)->ignore();
-        UiMessageBox prompt(QMessageBox::Information,QCoreApplication::translate("Kemu","Storage"),
+        QMessageBox prompt(QMessageBox::Information,QCoreApplication::translate("Kemu","Storage"),
             QCoreApplication::translate("Kemu","Disk expansion is in progress. Please wait before closing Kemu."),
             QMessageBox::Ok,mDialog);
         prompt.exec();
@@ -270,7 +269,7 @@ void UpdateController::moveStorage() {
             QCoreApplication::translate("Kemu","Choose a folder for the virtual disk"),qpath(current.parent_path()));
         if (directory.isEmpty()) return;
         const auto destination = storage::moveDestination(mAvd,fs::path(directory.toStdWString()));
-        UiMessageBox prompt(QMessageBox::Question,QCoreApplication::translate("Kemu","Move disk"),
+        QMessageBox prompt(QMessageBox::Question,QCoreApplication::translate("Kemu","Move disk"),
             QCoreApplication::translate("Kemu","Kemu will close, move the virtual disk to the folder below, and restart. This may take several minutes. Keep both drives connected until it finishes.") +
             "\n\n" + QDir::toNativeSeparators(qpath(destination)),QMessageBox::NoButton,mDialog);
         prompt.setObjectName("KemuStorageMove");
@@ -286,7 +285,7 @@ void UpdateController::moveStorage() {
         }
         mClosing = true; mWindow->close();
     } catch (const std::exception& error) {
-        UiMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Move disk"),
+        QMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Move disk"),
             QCoreApplication::translate("Kemu","Could not move the disk.") + "\n\n" +
             QString::fromUtf8(error.what()),QMessageBox::Ok,mDialog);
         prompt.exec(); refreshStorage();
@@ -296,7 +295,7 @@ void UpdateController::storageFailure(const QString& error) {
     mGrowingStorage = false;
     mDialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(1);
     showSettings();
-    UiMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Storage"),
+    QMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Storage"),
         QCoreApplication::translate("Kemu","Could not complete disk expansion. Your data has not been reset. Restart Kemu to retry.") +
         "\n\n" + error,QMessageBox::Ok,mDialog);
     prompt.exec();
@@ -327,7 +326,7 @@ void UpdateController::expandStorage() {
         confirm->setObjectName("KemuStorageConfirm"); cancel->setDefault(true); confirm->setAutoDefault(false);
         connect(confirm,&QPushButton::clicked,&prompt,&QDialog::accept);
         connect(cancel,&QPushButton::clicked,&prompt,&QDialog::reject);
-        layout->addLayout(buttons); prompt.resize(440,prompt.sizeHint().height()); applyUiFont(&prompt);
+        layout->addLayout(buttons); prompt.resize(440,prompt.sizeHint().height());
         if (prompt.exec() != QDialog::Accepted || !mPerformance->save(mDialog)) return;
         const auto target = uint64_t(capacity->value());
         const auto adb = mAdb(), serial = mSerial();
@@ -471,7 +470,7 @@ void UpdateController::check(bool automatic) {
 }
 void UpdateController::offerDownload() {
     if (mInstallPrompt || mClosing) return;
-    auto* prompt = new UiMessageBox(QMessageBox::Question, QCoreApplication::translate("Kemu", "New version available"),
+    auto* prompt = new QMessageBox(QMessageBox::Question, QCoreApplication::translate("Kemu", "New version available"),
         QCoreApplication::translate("Kemu", "Version %1 is available. Download the update now?").arg(QString::fromStdString(mPlan.target)),
         QMessageBox::NoButton, mDialog);
     mInstallPrompt = prompt;
@@ -576,7 +575,7 @@ void UpdateController::fetch() {
 }
 void UpdateController::offerInstall() {
     if (mInstallPrompt || mClosing) return;
-    auto* prompt = new UiMessageBox(QMessageBox::Information, QCoreApplication::translate("Kemu", "Update ready"),
+    auto* prompt = new QMessageBox(QMessageBox::Information, QCoreApplication::translate("Kemu", "Update ready"),
         mPlan.requiresFullInstaller
             ? QCoreApplication::translate("Kemu", "The full installer has been downloaded and verified. Updating now will close the emulator and open the installer.")
             : QCoreApplication::translate("Kemu", "The update has been downloaded and verified. Updating now will close and restart the emulator."), QMessageBox::NoButton, mDialog);

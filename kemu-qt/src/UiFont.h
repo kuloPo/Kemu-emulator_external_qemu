@@ -1,8 +1,8 @@
 #pragma once
+#include <QApplication>
 #include <QFont>
 #include <QFontDatabase>
-#include <QMessageBox>
-#include <QWidget>
+#include <QToolTip>
 
 namespace kemu {
 inline QFont uiFont(int points = 10, QFont::Weight weight = QFont::Normal) {
@@ -15,23 +15,10 @@ inline QFont uiFont(int points = 10, QFont::Weight weight = QFont::Normal) {
     font.setHintingPreference(QFont::PreferNoHinting);
     return font;
 }
-// Stylesheet polish can reset font strategy; apply to each actual text widget.
-inline void applyUiFont(QWidget* root, const QFont& font = uiFont()) {
-    root->ensurePolished(); root->setFont(font);
-    for (auto* child : root->findChildren<QWidget*>()) {
-        child->ensurePolished(); child->setFont(font);
-    }
+// Call once after creating QApplication, before constructing any widgets.
+inline void initializeUiFonts() {
+    const auto font = uiFont();
+    QApplication::setFont(font);
+    QToolTip::setFont(font);
 }
-// Message boxes create text/buttons lazily, after their parent was styled.
-class UiMessageBox : public QMessageBox {
-public:
-    using QMessageBox::QMessageBox;
-    int exec() override { applyUiFont(this); return QMessageBox::exec(); }
-    void open() override { applyUiFont(this); QMessageBox::open(); }
-protected:
-    void showEvent(QShowEvent* event) override {
-        QMessageBox::showEvent(event);
-        applyUiFont(this);
-    }
-};
 }

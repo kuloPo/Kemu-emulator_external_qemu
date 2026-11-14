@@ -1,4 +1,5 @@
 #include "../../src/LegalInfoDialog.h"
+#include "../../src/UiFont.h"
 #include "../../src/UpdateController.h"
 #include "../../src/UiLanguage.h"
 #include <QApplication>
@@ -35,6 +36,7 @@ static void checkNoticeText(QTextBrowser* browser, const QString& path) {
 }
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    kemu::initializeUiFonts();
     try {
         check(argc == 3, "Usage: Kemu <staged installation> <screenshot directory>");
         QTemporaryDir temporary;

@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QIcon>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QProgressBar>
 #include <QScreen>
@@ -58,7 +59,7 @@ StorageMoveDialog::StorageMoveDialog(const QString& destination) {
         "Keep both drives connected. Kemu will restart automatically when the move finishes."),content);
     hint->setObjectName("KemuMoveHint"); hint->setWordWrap(true); body->addWidget(hint);
     column->addWidget(content);
-    applyUiFont(this); heading->setFont(uiFont(14,QFont::DemiBold));
+    heading->setFont(uiFont(14,QFont::DemiBold));
     setFixedWidth(480);
     path->setText(path->fontMetrics().elidedText(path->toolTip(),Qt::ElideMiddle,430));
     setProgress(0); adjustSize();
@@ -95,7 +96,7 @@ int StorageMoveDialog::move(const std::filesystem::path& avd) {
     });
     exec(); worker.join();
     if (error.isEmpty()) return 0;
-    UiMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Move disk"),
+    QMessageBox prompt(QMessageBox::Warning,QCoreApplication::translate("Kemu","Move disk"),
         QCoreApplication::translate("Kemu","Could not finish moving the disk. Kemu will reopen using the saved disk location.") +
         "\n\n" + error,QMessageBox::Ok,this);
     prompt.exec(); return 1;
@@ -103,6 +104,7 @@ int StorageMoveDialog::move(const std::filesystem::path& avd) {
 int runStorageMove(int argc, char** argv) {
     const auto avd = std::filesystem::u8path(argv[2]);
     QApplication app(argc,argv);
+    initializeUiFonts();
     try {
         DWORD flags = 0;
         const auto lease = reinterpret_cast<HANDLE>(qEnvironmentVariable("KEMU_INSTANCE_HANDLE").toULongLong());

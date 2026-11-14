@@ -66,6 +66,7 @@ private:
 
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
+void startFontGuiChecks(EmulatorContainer*);
 void startAffinityGuiChecks(EmulatorContainer*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startResizeGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
@@ -107,7 +108,6 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         "#KemuWindow { background: #15191f; border: none; }"
         "QToolTip { color: #edf1f6; background: #29323e; border: 1px solid #414d5e; padding: 5px; }");
     container->viewport()->setStyleSheet("background: #0c0e12;");
-    container->setFont(uiFont());
     mTitle = new QWidget(container);
     mTitle->setObjectName("KemuTitleBar");
     mTitle->installEventFilter(this);
@@ -254,7 +254,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mFrameRate = new FrameRateLabel(container);
     mFrameRate->setObjectName("KemuFrameRate");
     mFrameRate->setStyleSheet("#KemuFrameRate { color: #b8f59b; background: #15191f; padding: 4px 8px; }");
-    applyUiFont(mFrameRate, uiFont(10, QFont::DemiBold));
+    mFrameRate->setFont(uiFont(10, QFont::DemiBold));
     mFrameRate->hide();
     connect(&mFrameRatePoll, &QTimer::timeout, this, &WindowChrome::updateFrameRate);
     display->installEventFilter(this);
@@ -286,10 +286,8 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     mNormalSizes[mSurfacePortrait] = sizing.initial;
     container->move(available.center() - container->rect().center());
     layout();
-    applyUiFont(mTitle);
-    applyUiFont(brand, uiFont(10, QFont::DemiBold));
-    applyUiFont(mSidebar);
-    applyUiFont(mLoading, uiFont(13, QFont::Medium));
+    brand->setFont(uiFont(10, QFont::DemiBold));
+    mLoadingText->setFont(uiFont(13, QFont::Medium));
     mTitle->show();
     mSidebar->show();
     mLoading->show();
@@ -503,6 +501,7 @@ void WindowChrome::pollBoot() {
         mDisplay->rotateSkin(static_cast<SkinRotation>((4 - rotation) % 4));
     });
 #ifdef KEMU_GUI_TESTS
+    if (qEnvironmentVariableIsSet("KEMU_FONT_TEST_RESULTS")) startFontGuiChecks(mContainer);
     if (qEnvironmentVariableIsSet("KEMU_ROTATION_TEST_RESULTS")) startRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_RESIZE_TEST_RESULTS")) startResizeGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_SENSOR_ROTATION_TEST_RESULTS")) startSensorRotationGuiChecks(mContainer, mDisplay);
@@ -545,7 +544,7 @@ void WindowChrome::checkAdb() {
     mAdbPath = QString::fromStdString(adb->adbPath());
     if (!mAdbPath.isEmpty()) return;
 
-    auto* warning = new UiMessageBox(QMessageBox::Warning, QStringLiteral("Kemu"),
+    auto* warning = new QMessageBox(QMessageBox::Warning, QStringLiteral("Kemu"),
         QCoreApplication::translate("Kemu", "No usable ADB found"), QMessageBox::Ok, mContainer);
     warning->setObjectName("KemuAdbWarning");
     warning->setAttribute(Qt::WA_DeleteOnClose);

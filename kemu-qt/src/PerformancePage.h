@@ -1,6 +1,5 @@
 #pragma once
 #include "../launcher/PerformanceConfig.h"
-#include "UiFont.h"
 #include "DetachedProcess.h"
 #include <QButtonGroup>
 #include <QCoreApplication>
@@ -13,6 +12,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
@@ -24,12 +24,12 @@
 #include <initializer_list>
 
 namespace kemu {
-class PerformanceRestartPrompt final : public UiMessageBox {
+class PerformanceRestartPrompt final : public QMessageBox {
 public:
-    using UiMessageBox::UiMessageBox;
+    using QMessageBox::QMessageBox;
 protected:
     void showEvent(QShowEvent* event) override {
-        UiMessageBox::showEvent(event);
+        QMessageBox::showEvent(event);
         auto* buttons=findChild<QDialogButtonBox*>();
         auto* row=buttons ? qobject_cast<QBoxLayout*>(buttons->layout()) : nullptr;
         if (!row) return;
@@ -180,7 +180,7 @@ public:
         if (data == mSaved) return true;
         QSaveFile file(mPath);
         if (!QDir().mkpath(QFileInfo(mPath).absolutePath()) || !file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
-            UiMessageBox warning(QMessageBox::Warning,QCoreApplication::translate("Kemu","Performance"),QCoreApplication::translate("Kemu","Could not save performance settings. Please try again."),QMessageBox::Ok,dialog);
+            QMessageBox warning(QMessageBox::Warning,QCoreApplication::translate("Kemu","Performance"),QCoreApplication::translate("Kemu","Could not save performance settings. Please try again."),QMessageBox::Ok,dialog);
             warning.exec(); dialog->show(); return false;
         }
         mSaved = data;
@@ -199,7 +199,7 @@ public:
             const bool started = mRestart ? mRestart(root) : startDetachedProcess(root + "/Kemu.exe", {"--restart-pid",QString::number(GetCurrentProcessId())},root);
             if (started) window->close();
             else {
-                UiMessageBox warning(QMessageBox::Warning,QCoreApplication::translate("Kemu","Restart required"),QCoreApplication::translate("Kemu","Could not restart Kemu. Please close and reopen it manually."),QMessageBox::Ok,dialog);
+                QMessageBox warning(QMessageBox::Warning,QCoreApplication::translate("Kemu","Restart required"),QCoreApplication::translate("Kemu","Could not restart Kemu. Please close and reopen it manually."),QMessageBox::Ok,dialog);
                 warning.exec();
             }
         }

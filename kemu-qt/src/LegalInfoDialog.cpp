@@ -1,5 +1,4 @@
 #include "LegalInfoDialog.h"
-#include "UiFont.h"
 #include <QBoxLayout>
 #include <QCoreApplication>
 #include <QDesktopServices>
@@ -75,7 +74,7 @@ LegalInfoDialog::LegalInfoDialog(QWidget* parent, const QString& installRoot, in
     connect(close, &QPushButton::clicked, this, &QDialog::close);
     buttons->addWidget(back); buttons->addStretch(); buttons->addWidget(close); column->addLayout(buttons);
     connect(mSections, &QListWidget::currentRowChanged, this, &LegalInfoDialog::loadSection);
-    selectSection(section); applyUiFont(this);
+    selectSection(section);
 }
 void LegalInfoDialog::selectSection(int section) {
     section = qBound(0, section, 2);

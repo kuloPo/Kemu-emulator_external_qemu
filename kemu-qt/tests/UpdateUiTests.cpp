@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
+#include "../src/UiFont.h"
 #include <QPointer>
 #include <QPushButton>
 #include <QProgressBar>
@@ -446,7 +447,7 @@ static void checkUpdateFailureVisibility() {
     }
 }
 int main(int argc, char** argv) {
-    QApplication app(argc, argv); app.setQuitOnLastWindowClosed(false); QTemporaryDir temporary;
+    QApplication app(argc, argv); kemu::initializeUiFonts(); app.setQuitOnLastWindowClosed(false); QTemporaryDir temporary;
     QSettings::setDefaultFormat(QSettings::IniFormat); QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,temporary.path());
     if (argc > 1 && QString::fromUtf8(argv[1]) == "move-progress") {
         try {
