@@ -28,6 +28,24 @@
 #include <QThread>
 #include <iostream>
 #include <tuple>
+static kemu::update::FetchJson fixtureMetadata(std::function<kemu::update::Json()> history) {
+    using namespace kemu::update;
+    return [history = std::move(history), cached = Json{}](const std::string& url) mutable -> Json {
+        if (url == std::string(ApiReleasesUrl) + "?per_page=100&page=1") {
+            cached = history();
+            Json releases = Json::array();
+            for (const auto& entry : cached.at("releases")) {
+                const auto version = entry.at("version").get<std::string>();
+                releases.push_back({{"tag_name",version},{"draft",false},{"prerelease",version.find('-') != version.npos}});
+            }
+            return releases;
+        }
+        for (const auto& entry : cached.at("releases"))
+            if (url == "https://raw.githubusercontent.com/kuloPo/Kemu/refs/tags/" + entry.at("version").get<std::string>() + "/version-history.json")
+                return cached;
+        throw std::runtime_error("Unexpected update metadata URL: " + url);
+    };
+}
 class CloseProbe : public QWidget {
 public:
     int closes = 0;
@@ -185,7 +203,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
             kemu::setUiLanguage(automatic ? "zh-CN" : "en");
             QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",automatic);
             auto window = std::make_unique<QWidget>();
-            auto* controller = new kemu::UpdateController(window.get(),[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+            auto* controller = new kemu::UpdateController(window.get(),[]{return QString();},[]{return QString();},fixtureMetadata([&]{return history;}),transfer);
             auto* dialog = window->findChild<QDialog*>("KemuSettings"); dialog->setAttribute(Qt::WA_DontShowOnScreen);
             auto* button = dialog->findChild<QPushButton*>("KemuCheckUpdate");
             if (automatic) {
@@ -233,7 +251,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                     else fs::remove(stage/"downloaded.json");
                     if (cacheState == 2) fs::rename(stage/name,stage/(std::string(name)+".part"));
                     QWidget cacheWindow;
-                    kemu::UpdateController cached(&cacheWindow,[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+                    kemu::UpdateController cached(&cacheWindow,[]{return QString();},[]{return QString();},fixtureMetadata([&]{return history;}),transfer);
                     auto* cachedDialog = cacheWindow.findChild<QDialog*>("KemuSettings");
                     cachedDialog->setAttribute(Qt::WA_DontShowOnScreen);
                     const auto before = transfers.size();
@@ -247,7 +265,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                 {
                     fs::remove(stage/"downloaded.json"); fs::create_directory(stage/"downloaded.json.tmp");
                     QWidget cacheWindow;
-                    kemu::UpdateController cached(&cacheWindow,[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+                    kemu::UpdateController cached(&cacheWindow,[]{return QString();},[]{return QString();},fixtureMetadata([&]{return history;}),transfer);
                     auto* cachedDialog = cacheWindow.findChild<QDialog*>("KemuSettings");
                     cachedDialog->setAttribute(Qt::WA_DontShowOnScreen);
                     auto* cachedButton = cachedDialog->findChild<QPushButton*>("KemuCheckUpdate");
@@ -262,7 +280,7 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
                 writeText(stage/name,"invalid cache");
                 corrupt = true; transfers.clear();
                 QWidget retryWindow;
-                kemu::UpdateController retry(&retryWindow,[]{return QString();},[]{return QString();},[&]{return history;},transfer);
+                kemu::UpdateController retry(&retryWindow,[]{return QString();},[]{return QString();},fixtureMetadata([&]{return history;}),transfer);
                 auto* retryDialog = retryWindow.findChild<QDialog*>("KemuSettings"); retryDialog->setAttribute(Qt::WA_DontShowOnScreen);
                 auto* retryButton = retryDialog->findChild<QPushButton*>("KemuCheckUpdate");
                 retryButton->click();
@@ -299,10 +317,10 @@ static void checkDownloadFlow(const kemu::update::fs::path& fixtures) {
         std::atomic<int> checks{0};
         QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",enabled);
         QWidget window;
-        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&] {
+        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},fixtureMetadata([&] {
             ++checks;
             return Json{{"schema_version",1},{"releases",Json::array({{{"version","v0.1.0"},{"files",Json::array()}}})}};
-        });
+        }));
         QEventLoop wait; QTimer::singleShot(2300,&wait,&QEventLoop::quit); wait.exec();
         controller.stop();
         require(checks==(enabled ? 1 : 0) && !window.findChild<QDialog*>("KemuSettings")->isVisible(), "Disabled checks and up-to-date startup must stay quiet");
@@ -322,10 +340,10 @@ static void checkUnknownVersionStartup() {
             std::atomic<int> checks{0};
             QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",automatic);
             QWidget window;
-            kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&] {
+            kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},fixtureMetadata([&] {
                 ++checks; fs::remove(root/"VERSION.txt");
                 return Json{{"schema_version",1},{"releases",Json::array({{{"version","v0.3.0"},{"files",Json::array()}}})}};
-            });
+            }));
             auto* dialog=window.findChild<QDialog*>("KemuSettings"); dialog->setAttribute(Qt::WA_DontShowOnScreen);
             if (!automatic) dialog->show();
             auto* status=dialog->findChild<QLabel*>("KemuUpdateStatus"); const auto previousStatus=status->text();
@@ -363,10 +381,10 @@ static void checkUpdateNavigation() {
         writeText(root/"VERSION.txt","v0.1.0\n"); kemu::setUiLanguage("en");
         QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",false);
         QWidget window;
-        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},[&]() -> Json {
+        kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},fixtureMetadata([&]() -> Json {
             if (failure) throw std::runtime_error("Fixture update failure");
             return {{"schema_version",1},{"releases",Json::array({{{"version","v0.2.0"},{"files",Json::array()}}})}};
-        });
+        }));
         auto* dialog=window.findChild<QDialog*>("KemuSettings"); dialog->setAttribute(Qt::WA_DontShowOnScreen);
         auto* tabs=dialog->findChild<QListWidget*>("KemuSettingsTabs");
         auto* pages=dialog->findChild<QStackedWidget*>("KemuSettingsPages");
@@ -401,7 +419,7 @@ static void checkUpdateFailureVisibility() {
         QSettings(QSettings::defaultFormat(),QSettings::UserScope,"Kemu","Kemu").setValue("updates/automatic",automatic);
         QWidget window;
         kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();},
-            []() -> Json { throw NetworkError("HTTPS request failed; check your connection"); });
+            [](const std::string&) -> Json { throw NetworkError("HTTPS request failed; check your connection"); });
         auto* dialog = window.findChild<QDialog*>("KemuSettings");
         dialog->setAttribute(Qt::WA_DontShowOnScreen);
         if (visible) { dialog->findChild<QListWidget*>("KemuSettingsTabs")->setCurrentRow(2); dialog->show(); }
@@ -606,12 +624,12 @@ int main(int argc, char** argv) {
         Json history={{"schema_version",1},{"releases",Json::array({
             {{"version","v0.1.0"},{"files",Json::array()}},
             {{"version","v0.2.0"},{"files",{"a.dll"}}}})}};
-        prepareUpdateTask(root,history);
+        prepareUpdateTask(root,history,"v0.2.0");
         writeText(stage/"payload/a.dll","new");
         writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
-        saveDownloadedUpdate(stage,resolve(history,"v0.1.0"));
+        saveDownloadedUpdate(stage,resolve(history,"v0.1.0","v0.2.0"));
     }
-    QWidget window; kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();}, [&] { return kemu::update::readJson(kemu::update::fs::path(temporary.path().toStdWString()) / ".kemu-update/history.json"); });
+    QWidget window; kemu::UpdateController controller(&window,[]{return QString();},[]{return QString();}, fixtureMetadata([&] { return kemu::update::readJson(kemu::update::fs::path(temporary.path().toStdWString()) / ".kemu-update/history.json"); }));
     window.findChild<QDialog*>("KemuSettings")->setAttribute(Qt::WA_DontShowOnScreen);
     controller.showSettings();
     auto* initial = window.findChild<QCheckBox*>("KemuAutoUpdate");

@@ -67,9 +67,34 @@ void validatePath(const std::string& value, bool android) {
     if (!android) require(lower(path).rfind(".kemu-update", 0) != 0, "Reserved updater path");
 }
 void validateHash(const std::string& hash) { require(std::regex_match(hash, std::regex("[0-9a-f]{64}")), "Invalid SHA-256"); }
-Plan resolve(const Json& history, const std::string& current) {
+UpdateSource fetchUpdateSource(const std::string& current, const FetchJson& fetch) {
     if (current.empty()) throw VersionUnavailable();
     validateVersion(current);
+    UpdateSource source{current, {{"schema_version", 1}, {"releases", Json::array()}}};
+    const bool prerelease = current.find('-') != current.npos;
+    for (unsigned page = 1; ; ++page) {
+        require(page <= 100, "Too many release pages");
+        const auto releases = fetch(std::string(ApiReleasesUrl) + "?per_page=100&page=" + std::to_string(page));
+        require(releases.is_array() && releases.size() <= 100, "Invalid release list");
+        for (const auto& release : releases) {
+            if (release.at("draft").get<bool>()) continue;
+            const auto version = release.at("tag_name").get<std::string>();
+            try { validateVersion(version); } catch (const std::runtime_error&) { continue; }
+            if (!prerelease && (release.at("prerelease").get<bool>() || version.find('-') != version.npos)) continue;
+            if (compareVersions(version, source.target) > 0) source.target = version;
+        }
+        if (releases.size() < 100) break;
+    }
+    if (source.target != current)
+        source.history = fetch("https://raw.githubusercontent.com/kuloPo/Kemu/refs/tags/" + source.target + "/version-history.json");
+    return source;
+}
+Plan resolve(const Json& history, const std::string& current, const std::string& target) {
+    if (current.empty()) throw VersionUnavailable();
+    validateVersion(current);
+    validateVersion(target);
+    require(compareVersions(target, current) >= 0, "Update target is older than the installed version");
+    require(current.find('-') != current.npos || target.find('-') == target.npos, "Stable installations cannot update to a prerelease");
     require(history.at("schema_version") == 1 && history.at("releases").is_array(), "Unsupported version history");
     std::vector<Release> releases; std::set<std::string> versions;
     bool found = false;
@@ -87,8 +112,8 @@ Plan resolve(const Json& history, const std::string& current) {
         releases.push_back(std::move(release));
     }
     std::sort(releases.begin(), releases.end(), [](const Release& a, const Release& b) { return compareVersions(a.version, b.version) < 0; });
-    Plan plan; plan.current = current; plan.target = current;
-    for (const auto& r : releases) if (compareVersions(r.version, plan.target) > 0 && (current.find('-') != current.npos || r.version.find('-') == r.version.npos)) plan.target = r.version;
+    Plan plan; plan.current = current; plan.target = target;
+    require(target == current || versions.count(target), "Release version is missing from its version history");
     if (!found && plan.target != current) { plan.requiresFullInstaller = true; return plan; }
     for (const auto& r : releases) {
         if (compareVersions(r.version, current) > 0 && compareVersions(r.version, plan.target) <= 0 && r.files.empty()) {
@@ -280,10 +305,10 @@ bool cleanupInstalledFullUpdate(const fs::path& root, bool runningHelper) {
     }
     return true;
 }
-Plan prepareUpdateTask(const fs::path& root, const Json& history) {
+Plan prepareUpdateTask(const fs::path& root, const Json& history, const std::string& target) {
     const auto current = readVersion(root);
     require(!fs::exists(root / ".kemu-update-pending"), "Recover unfinished installation before checking updates");
-    auto plan = resolve(history, current);
+    auto plan = resolve(history, current, target);
     auto stage = root / ".kemu-update";
     bool reuse = false;
     if (fs::exists(stage)) {
@@ -352,8 +377,8 @@ bool loadDownloadedUpdate(const fs::path& root, fs::path& stage, Plan& plan, Ful
         safePath(cached, "downloaded.json");
         auto record = readJson(cached / "downloaded.json");
         require(record.at("schema_version") == 1 && record.at("from") == current, "Stale downloaded update");
-        auto selected = resolve(readJson(cached / "history.json"), current);
-        require(record.at("to") == selected.target && compareVersions(selected.target, current) > 0, "Invalid downloaded target");
+        auto selected = resolve(readJson(cached / "history.json"), current, record.at("to").get<std::string>());
+        require(compareVersions(selected.target, current) > 0, "Invalid downloaded target");
         require(record.value("full_installer", false) == selected.requiresFullInstaller, "Downloaded update type changed");
         if (selected.requiresFullInstaller) {
             safePath(cached, "installer-release.json");

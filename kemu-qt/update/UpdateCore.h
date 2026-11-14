@@ -12,8 +12,10 @@ namespace kemu::update {
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
 inline constexpr const char* ReleasesUrl = "https://github.com/kuloPo/Kemu/releases";
-inline constexpr const char* HistoryUrl = "https://raw.githubusercontent.com/kuloPo/Kemu/main/version-history.json";
-inline constexpr const char* ApiReleasesUrl = "https://api.github.com/repos/kuloPo/Kemu/releases/tags/";
+inline constexpr const char* ApiReleasesUrl = "https://api.github.com/repos/kuloPo/Kemu/releases";
+using FetchJson = std::function<Json(const std::string&)>;
+struct UpdateSource { std::string target; Json history; };
+UpdateSource fetchUpdateSource(const std::string& current, const FetchJson& fetch);
 struct Release { std::string version; std::vector<std::string> files; };
 struct Plan {
     std::string current, target;
@@ -61,9 +63,9 @@ void validateVersion(const std::string& version);
 int compareVersions(const std::string& a, const std::string& b);
 void validatePath(const std::string& path, bool android = false);
 void validateHash(const std::string& hash);
-Plan resolve(const Json& history, const std::string& current);
+Plan resolve(const Json& history, const std::string& current, const std::string& target);
 void clearUpdateDirectory(const fs::path& root, const fs::path& directory);
-Plan prepareUpdateTask(const fs::path& root, const Json& history);
+Plan prepareUpdateTask(const fs::path& root, const Json& history, const std::string& target);
 void saveDownloadedUpdate(const fs::path& stage, const Plan& plan,
                           const CancelCheck& checkCancelled = {}, const std::function<void()>& beginCommit = {});
 // MetadataOnly defers installer content verification to LockedInstaller before launch.

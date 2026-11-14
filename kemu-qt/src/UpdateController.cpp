@@ -50,8 +50,8 @@ static QString rootScript(QString script) {
     script.replace("'", "'\\''");
     return "su 0 sh -c '" + script + "'";
 }
-UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history, update::Download transfer)
-    : QObject(parent), mWindow(parent), mAdb(std::move(adb)), mSerial(std::move(serial)), mHistory(std::move(history)), mTransfer(transfer ? std::move(transfer) : download) {
+UpdateController::UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, update::FetchJson metadata, update::Download transfer)
+    : QObject(parent), mWindow(parent), mAdb(std::move(adb)), mSerial(std::move(serial)), mMetadata(std::move(metadata)), mTransfer(transfer ? std::move(transfer) : download) {
     initializeUiTranslations();
     mWindow->installEventFilter(this);
     auto root = qEnvironmentVariable("KEMU_INSTALL_ROOT");
@@ -441,12 +441,15 @@ void UpdateController::check(bool automatic) {
     if (mBusy || mInstallPrompt || fs::exists(storage::requestPath(mAvd))) return;
     if (!refreshVersion()) return;
     work([this] {
-        readVersion(mRoot);
+        const auto current = readVersion(mRoot);
         status(QCoreApplication::translate("Kemu", "Checking for updates...")); mDownloaded = false; mPlan = {};
         require(!fs::exists(mRoot / ".kemu-update-pending"), "An unfinished update needs recovery; restart Kemu");
-        const auto history = mHistory ? mHistory() : Json::parse(downloadText(HistoryUrl, 8*1024*1024,
-            [this] { return mCancel.requested(); }));
-        mPlan = prepareUpdateTask(mRoot, history);
+        const auto source = fetchUpdateSource(current, [this](const std::string& url) {
+            mCancel.check();
+            return mMetadata ? mMetadata(url) : Json::parse(downloadText(url, 8*1024*1024,
+                [this] { return mCancel.requested(); }));
+        });
+        mPlan = prepareUpdateTask(mRoot, source.history, source.target);
         mStage = mRoot / ".kemu-update";
         mDownloaded = loadDownloadedUpdate(mRoot, mStage, mPlan);
     }, [this, automatic] {
@@ -505,7 +508,7 @@ void UpdateController::fetch() {
         if (mPlan.requiresFullInstaller) {
             status(QCoreApplication::translate("Kemu", "Downloading and verifying the full installer for %1...").arg(QString::fromStdString(mPlan.target)));
             safePath(mStage, "installer-release.json");
-            mTransfer(std::string(ApiReleasesUrl) + mPlan.target,
+            mTransfer(std::string(ApiReleasesUrl) + "/tags/" + mPlan.target,
                 mStage / "installer-release.json", 8*1024*1024, [this] { return mCancel.requested(); }, {});
             const auto installer = selectInstaller(readJson(mStage / "installer-release.json"), mPlan.target);
             auto partial = mStage / (installer.name + ".part");

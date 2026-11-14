@@ -13,7 +13,7 @@ namespace kemu {
 class PerformancePage;
 class UpdateController final : public QObject {
 public:
-    UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, std::function<update::Json()> history = {}, update::Download transfer = {});
+    UpdateController(QWidget* parent, std::function<QString()> adb, std::function<QString()> serial, update::FetchJson metadata = {}, update::Download transfer = {});
     ~UpdateController() override;
     void showSettings();
     void stop();
@@ -61,7 +61,7 @@ private:
     QCheckBox* mAutoUpdate;
     PerformancePage* mPerformance;
     std::function<QString()> mAdb, mSerial;
-    std::function<update::Json()> mHistory;
+    update::FetchJson mMetadata;
     update::Download mTransfer;
     update::fs::path mRoot, mStage, mAvd;
     update::Plan mPlan;

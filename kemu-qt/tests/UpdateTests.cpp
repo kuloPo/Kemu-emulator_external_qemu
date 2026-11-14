@@ -15,6 +15,51 @@ static fs::path setup(const fs::path& base, const std::string& name) {
     writeJson(stage / "job.json", {{"schema_version",1},{"from","v0.1.0"},{"to","v0.2.0"},{"files",Json::array({item(root,stage/"payload","a.dll"),item(root,stage/"payload","new.dll"),item(root,stage/"payload","VERSION.txt")})}});
     writeJson(root / ".kemu-update-pending", {{"stage",".kemu-update"}}); return root;
 }
+static void checkReleaseDiscovery() {
+    const auto release = [](const std::string& tag, bool prerelease = false, bool draft = false) {
+        return Json{{"tag_name",tag},{"draft",draft},{"prerelease",prerelease}};
+    };
+    const Json releases = Json::array({release("v0.2.0"), release("v0.10.0"), release("v1.0.0-rc.2",true),
+        release("v9.0.0",false,true), release("v8.0.0",true), release("v7.0.0-beta"), release("../main")});
+    const Json history = {{"schema_version",1},{"releases",Json::array({
+        {{"version","v0.1.0"},{"files",Json::array()}},{{"version","v0.10.0"},{"files",{"a.dll"}}},
+        {{"version","v8.0.0"},{"files",Json::array()}},{{"version","v99.0.0"},{"files",{"unpublished.dll"}}}})}};
+    for (const auto& current : {"v0.1.0", "v0.1.0-beta"}) {
+        const std::string target = std::string(current).find('-') == std::string::npos ? "v0.10.0" : "v8.0.0";
+        std::vector<std::string> urls;
+        const auto source = fetchUpdateSource(current, [&](const std::string& url) {
+            urls.push_back(url); return urls.size() == 1 ? releases : history;
+        });
+        check(source.target == target && source.history == history, "Published releases determine the target version");
+        check(urls == std::vector<std::string>{std::string(ApiReleasesUrl)+"?per_page=100&page=1",
+              "https://raw.githubusercontent.com/kuloPo/Kemu/refs/tags/"+target+"/version-history.json"},
+              "History must come from the selected release tag, not the default branch");
+        const auto plan = resolve(source.history,current,source.target);
+        check(plan.target == target && !plan.files.count("unpublished.dll"), "History cannot advance beyond the published target");
+    }
+    for (const auto& available : {Json::array(), Json::array({release("v0.1.0"),release("v0.0.1")})}) {
+        int requests = 0;
+        const auto source = fetchUpdateSource("v0.1.0", [&](const std::string&) { ++requests; return available; });
+        check(requests == 1 && source.target == "v0.1.0" && resolve(source.history,"v0.1.0",source.target).releases.empty(),
+              "No newer release must avoid history downloads and downgrades");
+    }
+    int requests = 0;
+    const auto paged = fetchUpdateSource("v0.1.0", [&](const std::string& url) {
+        ++requests;
+        if (requests == 1) return Json(std::vector<Json>(100,release("v0.2.0")));
+        if (requests == 2) {
+            check(url == std::string(ApiReleasesUrl)+"?per_page=100&page=2", "Release discovery must follow pagination");
+            return Json::array({release("v0.10.0")});
+        }
+        return history;
+    });
+    check(requests == 3 && paged.target == "v0.10.0", "A later page can contain the highest version");
+    rejects([&] { fetchUpdateSource("v0.1.0", [](const std::string&) { return Json::object(); }); });
+    rejects([&] { fetchUpdateSource("v0.1.0", [](const std::string&) -> Json { throw NetworkError("Fixture network error"); }); });
+    rejects([&] { resolve(history,"v0.1.0","v0.2.0"); });
+    rejects([&] { resolve(history,"v0.1.0","v0.0.1"); });
+    rejects([&] { resolve(history,"v0.1.0","v1.0.0-beta"); });
+}
 static void checkDownloadCancellation(const fs::path& base) {
     for (const bool full : {false, true}) {
         const auto root = base/(full ? "cancel-full" : "cancel-delta"), stage = root/".kemu-update";
@@ -22,7 +67,7 @@ static void checkDownloadCancellation(const fs::path& base) {
         const Json history = {{"schema_version",1},{"releases",Json::array({
             {{"version","v0.1.0"},{"files",Json::array()}},
             {{"version","v0.2.0"},{"files",full ? Json::array() : Json::array({"a.dll"})}}})}};
-        const auto plan = prepareUpdateTask(root,history);
+        const auto plan = prepareUpdateTask(root,history,"v0.2.0");
         const auto file = stage/(full ? "Kemu-v0.2.0-Setup-x64.exe" : "payload/a.dll");
         writeText(file,std::string(8*1024*1024,'x'));
         const auto digest = sha256(file);
@@ -64,7 +109,7 @@ static void checkInstallerFinalization(const fs::path& base) {
         writeText(root/"VERSION.txt","v0.1.0\n");
         const Json history = {{"schema_version",1},{"releases",Json::array({
             {{"version","v0.1.0"},{"files",Json::array()}},{{"version","v0.2.0"},{"files",Json::array()}}})}};
-        const auto plan = prepareUpdateTask(root,history);
+        const auto plan = prepareUpdateTask(root,history,"v0.2.0");
         const auto name = "Kemu-v0.2.0-Setup-x64.exe";
         const auto file = stage/name, partial = stage/(std::string(name)+".part");
         const auto input = source == "cache" ? file : partial;
@@ -101,7 +146,7 @@ static void checkUnknownVersionCache(const fs::path& base) {
         const Json history = {{"schema_version",1},{"releases",Json::array({
             {{"version","v0.1.0"},{"files",Json::array()}},
             {{"version","v0.2.0"},{"files",full ? Json::array() : Json::array({"a.dll"})}}})}};
-        const auto plan = prepareUpdateTask(root,history);
+        const auto plan = prepareUpdateTask(root,history,"v0.2.0");
         writeText(stage/"downloaded.json","preserve even an unreadable marker");
         writeText(stage/"payload/a.dll","cached payload"); writeText(stage/"v0.2.0.tar.xz","cached archive");
         auto snapshot = [&] {
@@ -120,7 +165,7 @@ static void checkUnknownVersionCache(const fs::path& base) {
                 check(versionLock!=INVALID_HANDLE_VALUE,"Cannot lock the version fixture");
             }
             int skipped = 0; fs::path restoredStage; Plan restoredPlan;
-            try { prepareUpdateTask(root,history); } catch (const VersionUnavailable&) { ++skipped; }
+            try { prepareUpdateTask(root,history,"v0.2.0"); } catch (const VersionUnavailable&) { ++skipped; }
             try { loadDownloadedUpdate(root,restoredStage,restoredPlan); } catch (const VersionUnavailable&) { ++skipped; }
             try { cleanupInstalledFullUpdate(root); } catch (const VersionUnavailable&) { ++skipped; }
             try { saveDownloadedUpdate(stage,plan); } catch (const VersionUnavailable&) { ++skipped; }
@@ -132,6 +177,7 @@ static void checkUnknownVersionCache(const fs::path& base) {
 }
 int main(int argc, char** argv) {
     try {
+        checkReleaseDiscovery();
         check(compareVersions("v0.10.0", "v0.2.0") > 0, "Numeric version ordering");
         check(compareVersions("v1.0.0-rc.2", "v1.0.0-rc.10") < 0, "Prerelease numeric ordering");
         check(compareVersions("v1.0.0", "v1.0.0-rc.10") > 0, "Release ordering");
@@ -144,28 +190,28 @@ int main(int argc, char** argv) {
             {{"version","v0.2.0"},{"files",{"/vendor/lib64/b.so","KemuUpdater.exe"}}},
             {{"version","v0.3.0-beta"},{"files",Json::array()}}
         })}};
-        auto plan = resolve(history,"v0.1.0"); check(plan.target == "v0.2.0", "Stable channel");
+        auto plan = resolve(history,"v0.1.0","v0.2.0"); check(plan.target == "v0.2.0", "Explicit release target");
         check(plan.files.at("/vendor/lib64/a.so").version == "v0.1.2" && plan.files.at("/vendor/lib64/b.so").version == "v0.2.0", "Last writer selection");
         check(!plan.requiresFullInstaller, "Current empty release and future prerelease must not block updates");
         check(plan.releases.size() == 3 && plan.releases.front().version == "v0.1.1" && plan.releases.back().version == "v0.2.0",
               "Every incremental package must be downloaded in version order, including overwritten files");
         auto major = history;
         major["releases"][3]["files"] = Json::array();
-        check(resolve(major,"v0.1.0").requiresFullInstaller, "Empty target requires full installer");
-        check(!resolve(major,"v0.2.0").requiresFullInstaller, "Latest installed version must not require reinstall");
+        check(resolve(major,"v0.1.0","v0.2.0").requiresFullInstaller, "Empty target requires full installer");
+        check(!resolve(major,"v0.2.0","v0.2.0").requiresFullInstaller, "Latest installed version must not require reinstall");
         major = history;
         major["releases"][1]["files"] = Json::array();
-        auto blocked = resolve(major,"v0.1.0");
+        auto blocked = resolve(major,"v0.1.0","v0.2.0");
         check(blocked.requiresFullInstaller && blocked.files.empty() && blocked.target == "v0.2.0",
               "Intermediate empty release must block a later incremental update");
-        check(!resolve(major,"v0.1.1").requiresFullInstaller, "Older empty release must not block updates");
-        check(resolve(history,"v0.0.0").requiresFullInstaller, "Known versions absent from history need the latest full installer");
-        rejects([&] { resolve(history,""); });
+        check(!resolve(major,"v0.1.1","v0.2.0").requiresFullInstaller, "Older empty release must not block updates");
+        check(resolve(history,"v0.0.0","v0.2.0").requiresFullInstaller, "Known versions absent from history need the latest full installer");
+        rejects([&] { resolve(history,"","v0.2.0"); });
         auto unordered = history;
         std::reverse(unordered["releases"].begin(), unordered["releases"].end());
-        check(resolve(unordered,"v0.1.0").releases.front().version == "v0.1.1", "History order must not affect update order");
-        auto duplicate = history; duplicate["releases"].push_back(history["releases"][0]); rejects([&] { resolve(duplicate,"v0.1.0"); });
-        auto bad = history; bad["releases"][1]["files"] = {"VERSION.txt"}; rejects([&] { resolve(bad,"v0.1.0"); });
+        check(resolve(unordered,"v0.1.0","v0.2.0").releases.front().version == "v0.1.1", "History order must not affect update order");
+        auto duplicate = history; duplicate["releases"].push_back(history["releases"][0]); rejects([&] { resolve(duplicate,"v0.1.0","v0.2.0"); });
+        auto bad = history; bad["releases"][1]["files"] = {"VERSION.txt"}; rejects([&] { resolve(bad,"v0.1.0","v0.2.0"); });
         rejects([] { parseChecksums(std::string(64,'a') + "  Windows/../bad\n"); });
         auto temp = fs::temp_directory_path() / ("kemu-update-tests-" + std::to_string(GetCurrentProcessId()));
         check(!fs::exists(temp), "Fresh test directory required"); fs::create_directory(temp);
@@ -192,16 +238,17 @@ int main(int argc, char** argv) {
         root=setup(temp,"downloaded"); stage=root/".kemu-update";
         Json cachedHistory = {{"schema_version",1},{"releases",Json::array({
             {{"version","v0.1.0"},{"files",Json::array()}},
-            {{"version","v0.2.0"},{"files",{"a.dll"}}}
+            {{"version","v0.2.0"},{"files",{"a.dll"}}},
+            {{"version","v9.0.0"},{"files",{"unpublished.dll"}}}
         })}};
         fs::remove(root/".kemu-update-pending");
-        prepareUpdateTask(root,cachedHistory);
+        prepareUpdateTask(root,cachedHistory,"v0.2.0");
         writeText(stage/"payload/a.dll","new");
         writeText(stage/"retained.tar.xz","completed package");
-        prepareUpdateTask(root,cachedHistory);
+        prepareUpdateTask(root,cachedHistory,"v0.2.0");
         check(readText(stage/"retained.tar.xz")=="completed package", "Same target must preserve interrupted task");
         writeText(stage/"v0.2.0/sha256sum.txt",sha256(stage/"payload/a.dll")+"  Windows/a.dll\n");
-        auto cachedPlan=resolve(cachedHistory,"v0.1.0");
+        auto cachedPlan=resolve(cachedHistory,"v0.1.0","v0.2.0");
         saveDownloadedUpdate(stage,cachedPlan);
         fs::path restoredStage; Plan restoredPlan;
         check(loadDownloadedUpdate(root,restoredStage,restoredPlan) && restoredStage==stage && restoredPlan.target=="v0.2.0", "Downloaded update survives restart");
@@ -214,15 +261,15 @@ int main(int argc, char** argv) {
         writeText(root/"VERSION.txt","v0.1.0\n");
         auto newerHistory=cachedHistory;
         newerHistory["releases"].push_back({{"version","v0.3.0"},{"files",{"a.dll"}}});
-        prepareUpdateTask(root,newerHistory);
+        prepareUpdateTask(root,newerHistory,"v0.3.0");
         check(!fs::exists(stage/"retained.tar.xz") && readJson(stage/"task.json").at("to")=="v0.3.0", "New latest target must clear previous task");
         writeText(stage/"protected","rollback"); writeJson(root/".kemu-update-pending",{{"stage",".kemu-update"}});
-        rejects([&] { prepareUpdateTask(root,cachedHistory); });
+        rejects([&] { prepareUpdateTask(root,cachedHistory,"v0.2.0"); });
         check(readText(stage/"protected")=="rollback", "Do not clear unfinished installation");
         rejects([&] { clearUpdateDirectory(root, root); });
         root = temp/"full-installer"; stage = root/".kemu-update";
         writeText(root/"VERSION.txt","v0.1.0\n");
-        check(prepareUpdateTask(root,major).requiresFullInstaller && fs::exists(stage/"task.json"),
+        check(prepareUpdateTask(root,major,"v0.2.0").requiresFullInstaller && fs::exists(stage/"task.json"),
               "Full installer needs a persistent download task");
         writeJson(stage/"history.json",major);
         writeJson(stage/"downloaded.json",{{"schema_version",1},{"from","v0.1.0"},{"to","v0.2.0"},{"files",Json::array()}});
@@ -233,7 +280,7 @@ int main(int argc, char** argv) {
             {"name",name},{"browser_download_url",std::string(ReleasesUrl)+"/download/v0.2.0/"+name},
             {"size",fs::file_size(stage/name)},{"digest","sha256:"+sha256(stage/name)}}})}};
         writeJson(stage/"installer-release.json",metadata);
-        const auto fullPlan = resolve(major,"v0.1.0");
+        const auto fullPlan = resolve(major,"v0.1.0","v0.2.0");
         saveDownloadedUpdate(stage,fullPlan);
         check(loadDownloadedUpdate(root,restoredStage,restoredPlan) && restoredPlan.requiresFullInstaller,
               "Full installer survives Later and restart");
@@ -278,7 +325,7 @@ int main(int argc, char** argv) {
               "Successful installation must remove the installer and retain only the running helper task");
         check(cleanupInstalledFullUpdate(root) && !fs::exists(stage), "Next startup must remove the helper cache");
         writeText(root/"VERSION.txt","v0.1.0\n");
-        prepareUpdateTask(root,cachedHistory);
+        prepareUpdateTask(root,cachedHistory,"v0.2.0");
         check(!fs::exists(stage/name), "Changing update type must clear the old task");
         if (argc > 1) {
             fs::path fixtures=fs::u8path(argv[1]);

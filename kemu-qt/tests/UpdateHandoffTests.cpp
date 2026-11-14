@@ -100,7 +100,7 @@ int wmain(int argc,wchar_t** argv) {
             if (full) {
                 const Json history={{"schema_version",1},{"releases",Json::array({
                     {{"version","v0.1.0"},{"files",Json::array()}},{{"version","v0.2.0"},{"files",Json::array()}}})}};
-                const auto plan=prepareUpdateTask(root,history);
+                const auto plan=prepareUpdateTask(root,history,"v0.2.0");
                 const auto name="Kemu-v0.2.0-Setup-x64.exe";
                 if (scenario=="launch-error") writeText(stage/name,"invalid executable");
                 else fs::copy_file(self,stage/name);
