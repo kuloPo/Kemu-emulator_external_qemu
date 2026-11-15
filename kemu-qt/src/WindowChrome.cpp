@@ -68,6 +68,7 @@ private:
 
 #ifdef KEMU_GUI_TESTS
 void startLiveGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
+void startMuteGuiChecks(EmulatorContainer*);
 void startFontGuiChecks(EmulatorContainer*);
 void startFullScreenGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startAffinityGuiChecks(EmulatorContainer*);
@@ -175,6 +176,7 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         auto* button = new IconButton(spec.icon, QCoreApplication::translate("Kemu", spec.label), mSidebar);
         button->setProperty("kemuLabel", spec.label);
         button->setEnabled(false);
+        if (spec.icon == Icon::Mute) mMuteButton = button;
         if (spec.icon == Icon::VolumeUp || spec.icon == Icon::VolumeDown) {
             button->setAutoRepeat(true);
             button->setAutoRepeatDelay(400);
@@ -559,7 +561,8 @@ void WindowChrome::pollBoot() {
     mBootPoll.stop();
     mLoading->hide();
     updateFrameRate();
-    for (auto* button : mButtons) button->setEnabled(true);
+    for (auto* button : mButtons) button->setEnabled(button != mMuteButton);
+    restoreMute();
     mDisplay->setFocus(Qt::OtherFocusReason);
     mRotation->start([this](int rotation) {
         if (mClosing || rotation == mGuestRotation) return;
@@ -576,8 +579,22 @@ void WindowChrome::pollBoot() {
     if (qEnvironmentVariableIsSet("KEMU_RESIZE_TEST_RESULTS")) startResizeGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_SENSOR_ROTATION_TEST_RESULTS")) startSensorRotationGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_RESULTS")) startLiveGuiChecks(mContainer, mDisplay);
+    if (qEnvironmentVariableIsSet("KEMU_MUTE_TEST_RESULTS")) startMuteGuiChecks(mContainer);
     if (qEnvironmentVariableIsSet("KEMU_AFFINITY_TEST_REQUEST")) startAffinityGuiChecks(mContainer);
 #endif
+}
+
+void WindowChrome::restoreMute() {
+    if (mClosing) return;
+    mMute->restore([this](const QString& error) {
+        if (mClosing) return;
+        if (!error.isEmpty()) {
+            qWarning("Kemu mute restore: %s", qPrintable(error));
+            QTimer::singleShot(1000, this, &WindowChrome::restoreMute);
+            return;
+        }
+        mMuteButton->setEnabled(true);
+    });
 }
 
 void WindowChrome::rotateDevice() {

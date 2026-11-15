@@ -42,6 +42,7 @@ private:
     void raiseChrome();
     void requestResize();
     void pollBoot();
+    void restoreMute();
     void rotateDevice();
     void writeDiagnostics();
     void checkAdb();
@@ -63,6 +64,7 @@ private:
     IconButton* mMaximize = nullptr;
     IconButton* mFullScreenButton = nullptr;
     IconButton* mRotate = nullptr;
+    IconButton* mMuteButton = nullptr;
     AndroidMute* mMute = nullptr;
     AndroidRotation* mRotation = nullptr;
     UpdateController* mUpdates = nullptr;

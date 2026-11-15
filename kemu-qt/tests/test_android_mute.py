@@ -14,10 +14,11 @@ import unittest
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "AndroidMute.cpp"
 COMMAND = re.search(
-    r'kToggleMuteCommand\[\] = R"SH\(shell:(.*?)\)SH";',
+    r'kMuteCommand\[\] = R"SH\((.*?)\)SH";',
     SOURCE.read_text(encoding="utf-8"),
     re.DOTALL,
 ).group(1)
+TOGGLE = "desired=toggle; " + COMMAND
 ADB = ["adb", "-s", "emulator-5554"]
 
 
@@ -52,7 +53,7 @@ def foreground():
 
 
 class AndroidMuteTests(unittest.TestCase):
-    def run_fake(self, initial, behavior="success"):
+    def run_fake(self, initial, behavior="success", desired="toggle"):
         # Shell functions replace only the service calls in this test process.
         # The production command still runs in Android's actual shell.
         prelude = """
@@ -62,6 +63,7 @@ dumpsys() {
     printf '%%s\\n' '- STREAM_ALARM:' '   Muted: true' ''
 }
 cmd() {
+    echo AUDIO_CHANGE
     [ "$1" = audio ] && [ "$3" = 3 ] || return 1
     case "$2:$fake_state" in
         adj-mute:false) next=true ;;
@@ -76,12 +78,24 @@ cmd() {
     esac
 }
 """ % (initial, behavior)
-        return shell(prelude + COMMAND)
+        return shell(prelude + "desired=" + desired + "; " + COMMAND)
 
     def test_mute_and_unmute(self):
         for state in ("true", "false"):
             with self.subTest(state=state):
-                self.assertIn("\n__KEMU_MUTE_EXIT:0\n", self.run_fake(state))
+                output = self.run_fake(state)
+                self.assertIn("\n__KEMU_MUTE_EXIT:0\n", output)
+                expected = "false" if state == "true" else "true"
+                self.assertIn("\n__KEMU_MUTE_STATE:" + expected + "\n", output)
+
+    def test_restore_explicit_state_is_idempotent(self):
+        for initial in ("true", "false"):
+            for desired in ("true", "false"):
+                with self.subTest(initial=initial, desired=desired):
+                    output = self.run_fake(initial, desired=desired)
+                    self.assertIn("\n__KEMU_MUTE_EXIT:0\n", output)
+                    self.assertIn("\n__KEMU_MUTE_STATE:" + desired + "\n", output)
+                    self.assertEqual("AUDIO_CHANGE" in output, initial != desired)
 
     def test_missing_or_invalid_state_does_not_control_audio(self):
         for state in ("unknown", "''"):
@@ -93,29 +107,31 @@ cmd() { echo UNEXPECTED_AUDIO_CHANGE; }
 dumpsys() { printf '%s\\n' '- STREAM_MUSIC:' '   Muted: unknown' ''; }
 cmd() { echo UNEXPECTED_AUDIO_CHANGE; }
 """
-                output = shell(prelude + COMMAND)
-                self.assertIn("\n__KEMU_MUTE_EXIT:1\n", output)
-                self.assertNotIn("UNEXPECTED_AUDIO_CHANGE", output)
+                for desired in ("toggle", "true", "false"):
+                    output = shell(prelude + "desired=" + desired + "; " + COMMAND)
+                    self.assertIn("\n__KEMU_MUTE_EXIT:1\n", output)
+                    self.assertNotIn("UNEXPECTED_AUDIO_CHANGE", output)
 
     def test_failed_or_ineffective_command_is_not_success(self):
         for behavior in ("fail", "noop", "invalid"):
             for state in ("true", "false"):
-                with self.subTest(behavior=behavior, state=state):
-                    self.assertIn(
-                        "\n__KEMU_MUTE_EXIT:1\n", self.run_fake(state, behavior)
-                    )
+                for desired in ("toggle", "false" if state == "true" else "true"):
+                    with self.subTest(behavior=behavior, state=state, desired=desired):
+                        output = self.run_fake(state, behavior, desired)
+                        self.assertIn("\n__KEMU_MUTE_EXIT:1\n", output)
+                        self.assertNotIn("__KEMU_MUTE_STATE:", output)
 
     def test_live_foreground_toggle_and_restore(self):
         original = media_state()
         window = foreground()
         print("\nForeground:", window, flush=True)
         try:
-            self.assertIn("\n__KEMU_MUTE_EXIT:0\n", shell(COMMAND))
+            self.assertIn("\n__KEMU_MUTE_EXIT:0\n", shell(TOGGLE))
             toggled = media_state()
             self.assertEqual(toggled[0], "false" if original[0] == "true" else "true")
             self.assertEqual(toggled[1], original[1], "Saved volume changed")
             self.assertEqual(foreground(), window)
-            self.assertIn("\n__KEMU_MUTE_EXIT:0\n", shell(COMMAND))
+            self.assertIn("\n__KEMU_MUTE_EXIT:0\n", shell(TOGGLE))
             self.assertEqual(media_state(), original)
             self.assertEqual(foreground(), window)
         finally:

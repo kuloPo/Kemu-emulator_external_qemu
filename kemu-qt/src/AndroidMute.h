@@ -9,15 +9,17 @@
 class QThread;
 
 namespace kemu {
-// Toggles Android's media mute state through AudioService using the emulator's
-// existing in-process ADB transport.
+// Persists and restores Android's media mute state through AudioService using
+// the emulator's existing in-process ADB transport.
 class AndroidMute final : public QObject {
 public:
     explicit AndroidMute(QObject* parent);
     ~AndroidMute() override;
     bool send(std::function<void(QString)> completed);
+    bool restore(std::function<void(QString)> completed);
     void cancel();
 private:
+    bool run(const char* desired, bool persist, std::function<void(QString)> completed);
     struct Request;
     std::shared_ptr<Request> mRequest;
     QThread* mThread = nullptr;
