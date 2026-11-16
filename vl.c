@@ -2142,6 +2142,10 @@ static bool main_loop_should_exit(void)
 #endif
     request = qemu_shutdown_requested();
     if (request) {
+        if (!no_shutdown) {
+            /* Stop host audio before snapshot saving can block the main loop. */
+            audio_shutdown();
+        }
 #ifdef CONFIG_ANDROID
         if (getConsoleAgents()->settings->android_qemu_mode()) {
             if (invalidate_exit_snapshot) {

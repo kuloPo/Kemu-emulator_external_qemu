@@ -140,6 +140,7 @@ static struct {
 
 // AEMU makes this extern visible.
 AudioState glob_audio_state;
+static bool audio_shutting_down;
 
 const struct mixeng_volume nominal_volume = {
     .mute = 0,
@@ -1164,7 +1165,7 @@ static int audio_is_timer_needed (void)
 
 static void audio_reset_timer (AudioState *s)
 {
-  if (audio_is_timer_needed()) {
+  if (!audio_shutting_down && audio_is_timer_needed()) {
         timer_mod_anticipate(
             s->ts, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + conf.period.ticks);
   } else {
@@ -1582,6 +1583,9 @@ static void audio_run_out (AudioState *s)
         }
 
         if (!live) {
+            if (hw->ctl_caps & VOICE_POLL_OUT_EMPTY_CAP) {
+                hw->pcm_ops->run_out(hw, 0);
+            }
             for (sw = hw->sw_head.lh_first; sw; sw = sw->entries.le_next) {
                 if (sw->active) {
                     free = audio_get_free (sw);
@@ -1735,6 +1739,10 @@ static void audio_run_capture (AudioState *s)
 void audio_run (const char *msg)
 {
     AudioState *s = &glob_audio_state;
+
+    if (audio_shutting_down) {
+        return;
+    }
 
     audio_run_out (s);
     audio_run_in (s);
@@ -1941,7 +1949,10 @@ static void audio_vm_change_state_handler (void *opaque, int running,
     AudioState *s = opaque;
     HWVoiceOut *hwo = NULL;
     HWVoiceIn *hwi = NULL;
-    int op = running ? VOICE_ENABLE : VOICE_DISABLE;
+    int op;
+
+    running = running && !audio_shutting_down;
+    op = running ? VOICE_ENABLE : VOICE_DISABLE;
 
     s->vm_running = running;
     while ((hwo = audio_pcm_hw_find_any_enabled_out (hwo))) {
@@ -1952,6 +1963,20 @@ static void audio_vm_change_state_handler (void *opaque, int running,
         hwi->pcm_ops->ctl_in (hwi, op, conf.try_poll_in);
     }
     audio_reset_timer (s);
+}
+
+void audio_shutdown(void)
+{
+    AudioState *s = &glob_audio_state;
+
+    if (audio_shutting_down) {
+        return;
+    }
+    audio_shutting_down = true;
+    s->vm_running = false;
+    if (s->ts) {
+        audio_vm_change_state_handler(s, 0, RUN_STATE_SHUTDOWN);
+    }
 }
 
 static bool is_cleaning_up;

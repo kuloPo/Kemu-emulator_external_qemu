@@ -1550,8 +1550,6 @@ static void stream_out_cb_locked(VirtIOSoundPCMStream *stream, int avail) {
     ASSERT(host_fs > 0);
     ASSERT((avail % host_fs) == 0);
     ASSERT(stream->period_frames > 0);
-    int min_write_sz = MIN(avail, MAX(stream->period_frames / 16, 4) * host_fs);
-
     while (avail > 0) {
         int size;
         void *data = pcm_ring_buffer_get_consume_chunk(&stream->hpcm_buf, &size);
@@ -1563,31 +1561,11 @@ static void stream_out_cb_locked(VirtIOSoundPCMStream *stream, int avail) {
                 ASSERT((written_sz % host_fs) == 0);
                 pcm_ring_buffer_consume(&stream->hpcm_buf, written_sz);
                 avail -= written_sz;
-                min_write_sz -= written_sz;
             } else {
                 return;
             }
         } else {
             ASSERT(stream->hpcm_buf.size == 0);
-            if (min_write_sz > 0) {
-                int16_t scratch[AUD_SCRATCH_SIZE];
-                DPRINTF("inserting %d frames of silence, state=%s",
-                        min_write_sz / host_fs, stream_state_str(stream->state));
-
-                // Insert `min_write_sz` bytes of silence.
-                fill_silence(scratch, MIN(sizeof(scratch), min_write_sz));
-                do {
-                    const int to_write_sz =
-                        MIN(sizeof(scratch), min_write_sz) / host_fs * host_fs;
-                    const int written_sz = AUD_write(voice, scratch, to_write_sz);
-                    if (written_sz > 0) {
-                        ASSERT((written_sz % host_fs) == 0);
-                        min_write_sz -= written_sz;
-                    } else {
-                        return;
-                    }
-                } while (min_write_sz > 0);
-            }
             break;
         }
     }

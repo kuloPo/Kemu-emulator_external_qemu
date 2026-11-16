@@ -28,6 +28,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/timer.h"
 #include "audio.h"
 
 #define AUDIO_CAP "dsound"
@@ -61,6 +62,9 @@ typedef struct {
     DWORD old_pos;
     int first_time;
     dsound *s;
+    DWORD play_pos;
+    DWORD pending_bytes;
+    int64_t last_play_ns;
 #ifdef DEBUG_DSOUND
     DWORD old_ppos;
     DWORD played;
@@ -295,7 +299,7 @@ static int dsound_get_status_out (LPDIRECTSOUNDBUFFER dsb, DWORD *statusp,
         return -1;
     }
 
-    if (*statusp & DSERR_BUFFERLOST) {
+    if (*statusp & DSBSTATUS_BUFFERLOST) {
         dsound_restore_out(dsb, s);
         return -1;
     }
@@ -432,11 +436,15 @@ static int dsound_ctl_out (HWVoiceOut *hw, int cmd, ...)
 
         dsound_clear_sample (hw, dsb, s);
 
-        hr = IDirectSoundBuffer_Play (dsb, 0, 0, DSBPLAY_LOOPING);
+        hr = IDirectSoundBuffer_SetCurrentPosition(dsb, 0);
         if (FAILED (hr)) {
-            dsound_logerr (hr, "Could not start playing buffer\n");
+            dsound_logerr(hr, "Could not reset playback position\n");
             return -1;
         }
+        ds->first_time = 1;
+        ds->old_pos = 0;
+        ds->play_pos = 0;
+        ds->pending_bytes = 0;
         break;
 
     case VOICE_DISABLE:
@@ -451,9 +459,8 @@ static int dsound_ctl_out (HWVoiceOut *hw, int cmd, ...)
                 return -1;
             }
         }
-        else {
-            dolog ("warning: Voice is not playing\n");
-        }
+        ds->first_time = 1;
+        ds->pending_bytes = 0;
         break;
     }
     return 0;
@@ -479,6 +486,9 @@ static int dsound_run_out (HWVoiceOut *hw, int live)
     int bufsize;
     dsound *s = ds->s;
     DSoundConf *conf = &s->conf;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int previous_rpos = hw->rpos;
+    bool starting;
 
     if (!dsb) {
         dolog ("Attempt to run empty with playback buffer\n");
@@ -491,30 +501,60 @@ static int dsound_run_out (HWVoiceOut *hw, int live)
     hr = IDirectSoundBuffer_GetCurrentPosition (
         dsb,
         &ppos,
-        ds->first_time ? &wpos : NULL
+        &wpos
         );
     if (FAILED (hr)) {
         dsound_logerr (hr, "Could not get playback buffer position\n");
         return 0;
     }
 
+    if (!ds->first_time) {
+        DWORD consumed = audio_ring_dist(ppos, ds->play_pos, bufsize);
+        int64_t buffer_ns = (int64_t)bufsize * 1000000000 /
+                            hw->info.bytes_per_second;
+
+        if (consumed >= ds->pending_bytes ||
+            now - ds->last_play_ns >= buffer_ns) {
+            hr = IDirectSoundBuffer_Stop(dsb);
+            if (FAILED(hr)) {
+                dsound_logerr(hr, "Could not stop drained playback buffer\n");
+                return 0;
+            }
+            ds->first_time = 1;
+            ds->pending_bytes = 0;
+        } else {
+            ds->pending_bytes -= consumed;
+            ds->play_pos = ppos;
+            ds->last_play_ns = now;
+        }
+    }
+
+    if (!live) {
+        return 0;
+    }
+
+    /* Data before the write cursor may already be queued by DirectSound. */
+    if (!ds->first_time &&
+        ds->pending_bytes < audio_ring_dist(wpos, ppos, bufsize)) {
+        return 0;
+    }
+
+    starting = ds->first_time;
+    if (starting) {
+        dsound_clear_sample(hw, dsb, s);
+        hr = IDirectSoundBuffer_SetCurrentPosition(dsb, 0);
+        if (FAILED(hr)) {
+            dsound_logerr(hr, "Could not reset drained playback position\n");
+            return 0;
+        }
+        ppos = 0;
+    }
+
     len = live << hwshift;
 
-    if (ds->first_time) {
-        if (conf->latency_millis) {
-            DWORD cur_blat;
-
-            cur_blat = audio_ring_dist (wpos, ppos, bufsize);
-            ds->first_time = 0;
-            old_pos = wpos;
-            old_pos +=
-                millis_to_bytes (&hw->info, conf->latency_millis) - cur_blat;
-            old_pos %= bufsize;
-            old_pos &= ~hw->info.align;
-        }
-        else {
-            old_pos = wpos;
-        }
+    if (starting) {
+        old_pos = millis_to_bytes(&hw->info, conf->latency_millis) % bufsize;
+        old_pos &= ~hw->info.align;
 #ifdef DEBUG_DSOUND
         ds->played = 0;
         ds->mixed = 0;
@@ -585,6 +625,23 @@ static int dsound_run_out (HWVoiceOut *hw, int live)
 
     dsound_unlock_out (dsb, p1, p2, blen1, blen2);
     ds->old_pos = (old_pos + (decr << hwshift)) % bufsize;
+
+    if (starting) {
+        ds->pending_bytes = audio_ring_dist(old_pos, ppos, bufsize);
+    }
+    ds->pending_bytes += decr << hwshift;
+    if (starting) {
+        hr = IDirectSoundBuffer_Play(dsb, 0, 0, DSBPLAY_LOOPING);
+        if (FAILED(hr)) {
+            dsound_logerr(hr, "Could not restart playback buffer\n");
+            hw->rpos = previous_rpos;
+            ds->pending_bytes = 0;
+            return 0;
+        }
+        ds->first_time = 0;
+        ds->play_pos = ppos;
+        ds->last_play_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
 
 #ifdef DEBUG_DSOUND
     ds->mixed += decr << hwshift;
@@ -901,7 +958,8 @@ static struct audio_driver dsound_audio_driver = {
     .max_voices_out = INT_MAX,
     .max_voices_in  = 1,
     .voice_size_out = sizeof (DSoundVoiceOut),
-    .voice_size_in  = sizeof (DSoundVoiceIn)
+    .voice_size_in  = sizeof (DSoundVoiceIn),
+    .ctl_caps       = VOICE_POLL_OUT_EMPTY_CAP
 };
 
 static void register_audio_dsound(void)

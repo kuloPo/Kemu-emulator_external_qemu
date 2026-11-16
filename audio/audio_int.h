@@ -231,6 +231,7 @@ void audio_run (const char *msg);
 #define VOICE_VOLUME 3
 
 #define VOICE_VOLUME_CAP (1 << VOICE_VOLUME)
+#define VOICE_POLL_OUT_EMPTY_CAP (1 << 4)
 
 static inline int audio_ring_dist (int dst, int src, int len)
 {
