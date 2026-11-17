@@ -61,6 +61,10 @@ namespace Ui {
 class EmulatorWindow;
 }
 
+namespace kemu {
+class AndroidShutdown;
+}
+
 typedef struct SkinSurface SkinSurface;
 class SkinSurfaceBitmap;
 class SwipeGesture;
@@ -505,7 +509,7 @@ private:
     void adbPushDone(std::string_view filePath,
                      android::emulation::FilePusher::Result result);
 
-    void runAdbShellPowerDownAndQuit();
+    void requestAndroidShutdown();
     void setVisibleExtent(QBitmap bitMap);
     Qt::CursorShape getCursorShape(bool mouseGrabbed);
 
@@ -646,7 +650,7 @@ private:
     QTimer mWheelScrollTimer;
     QTimer mTrackpadAggregateTimer;
     std::unique_ptr<SwipeGesture> mSwipeGesture;
-    bool mStartedAdbStopProcess;
+    std::unique_ptr<kemu::AndroidShutdown> mAndroidShutdown;
 
     bool mSkinRemoved{false};
     bool mFrameAlways;  // true = no floating emulator

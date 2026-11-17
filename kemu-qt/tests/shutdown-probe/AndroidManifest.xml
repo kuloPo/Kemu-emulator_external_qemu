@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.kemu.shutdownprobe">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="28" />
+    <application android:label="Shutdown probe" android:allowBackup="false">
+        <receiver android:name=".ProbeReceiver" android:exported="true" />
+    </application>
+</manifest>

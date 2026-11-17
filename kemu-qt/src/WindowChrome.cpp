@@ -72,6 +72,7 @@ void startMuteGuiChecks(EmulatorContainer*);
 void startFontGuiChecks(EmulatorContainer*);
 void startFullScreenGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startAffinityGuiChecks(EmulatorContainer*);
+void startShutdownGuiChecks(EmulatorContainer*);
 void startRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startResizeGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
 void startSensorRotationGuiChecks(EmulatorContainer*, EmulatorQtWindow*);
@@ -581,6 +582,7 @@ void WindowChrome::pollBoot() {
     if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_RESULTS")) startLiveGuiChecks(mContainer, mDisplay);
     if (qEnvironmentVariableIsSet("KEMU_MUTE_TEST_RESULTS")) startMuteGuiChecks(mContainer);
     if (qEnvironmentVariableIsSet("KEMU_AFFINITY_TEST_REQUEST")) startAffinityGuiChecks(mContainer);
+    if (qEnvironmentVariableIsSet("KEMU_SHUTDOWN_TEST_REQUEST")) startShutdownGuiChecks(mContainer);
 #endif
 }
 

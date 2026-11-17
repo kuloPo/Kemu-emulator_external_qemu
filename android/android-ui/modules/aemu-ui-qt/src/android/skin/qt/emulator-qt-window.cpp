@@ -12,6 +12,7 @@
 
 #include "android/skin/qt/emulator-qt-window.h"
 #include "WindowChrome.h"
+#include "AndroidShutdown.h"
 
 #include "aemu/base/Optional.h"
 #include "aemu/base/async/ThreadLooper.h"
@@ -615,7 +616,6 @@ EmulatorQtWindow::EmulatorQtWindow(QWidget* parent)
                       QObject::connect(dialog, SIGNAL(canceled()), this,
                                        SLOT(slot_adbPushCanceled()));
                   }),
-      mStartedAdbStopProcess(false),
       mHaveBeenFrameless(false) {
     qRegisterMetaType<QPainter::CompositionMode>();
     qRegisterMetaType<SkinRotation>();
@@ -1143,7 +1143,7 @@ void EmulatorQtWindow::closeEvent(QCloseEvent* event) {
             if (fastSnapshotV1) {
                 queueQuitEvent();
             } else {
-                runAdbShellPowerDownAndQuit();
+                requestAndroidShutdown();
             }
         }
         event->ignore();
@@ -2386,31 +2386,12 @@ void EmulatorQtWindow::slot_releaseBitmap(SkinSurface* s,
 }
 
 void EmulatorQtWindow::slot_requestClose(QSemaphore* semaphore) {
-    mContainer.kemuBeginClose();
-    if (isMainThreadRunning() && !mToolWindow->closeButtonClicked()) {
-        mToolWindow->on_close_button_clicked();
-    }
     QSemaphoreReleaser semReleaser(semaphore);
-    mToolWindow->shouldClose();
-    if (isMainThreadRunning()) {
-        if (!getConsoleAgents()->settings->android_cmdLineOptions()->grpc_ui) {
-            // TODO: This should be a backend operation, and moved out of Qt codebase.
-            using android::snapshot::Snapshotter;
-            Snapshotter::get().stopVulkanAppsIfApplicable();
-        }
-        queueQuitEvent();
-    }
-
-    // In Fishtank mode, we should notify the emulator to shut down
-    // if we are not in embedded mode.
-    auto opts = getConsoleAgents()->settings->android_cmdLineOptions();
-    if (opts->grpc_ui && !opts->qt_hide_window) {
-        if (getConsoleAgents()->vm) {
-            getConsoleAgents()->vm->vmShutdown();
-        }
-    }
-
-    System::get()->waitAndKillSelf();
+    // All normal close/restart paths must wait for guest poweroff. Neither a
+    // host quit event nor a process watchdog allows Android to flush its data.
+    // The signal can come from inside the container's closeEvent. QWidget
+    // ignores recursive close(), so continue after that event has returned.
+    QTimer::singleShot(0, &mContainer, &EmulatorContainer::close);
 }
 
 void EmulatorQtWindow::slot_requestUpdate(QRect rect, QSemaphore* semaphore) {
@@ -3900,21 +3881,11 @@ void EmulatorQtWindow::slot_adbWarningMessageAccepted() {
     }
 }
 
-void EmulatorQtWindow::runAdbShellPowerDownAndQuit() {
-    // we need to run it only once, so don't ever reset this
-    if (mStartedAdbStopProcess) {
-        return;
+void EmulatorQtWindow::requestAndroidShutdown() {
+    if (!mAndroidShutdown) {
+        mAndroidShutdown = std::make_unique<kemu::AndroidShutdown>(this);
     }
-    mStartedAdbStopProcess = true;
-    (*mAdbInterface)
-            ->runAdbCommand(
-                    {"shell", "stop"},
-                    [this](const android::emulation::
-                                   OptionalAdbCommandResult&) {
-                        queueQuitEvent();
-                    },
-                    5000);  // for qemu1, reboot -p will shutdown guest but
-                            // hangs, allow 5s
+    mAndroidShutdown->start();
 }
 
 void EmulatorQtWindow::checkNestedAndWarn() {

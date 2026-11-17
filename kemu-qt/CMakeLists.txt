@@ -42,6 +42,8 @@ target_sources(aemu-ui-qt PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.h
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidMute.h
+    ${CMAKE_CURRENT_LIST_DIR}/src/AndroidShutdown.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/AndroidShutdown.h
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidRotation.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/AndroidRotation.h
     ${CMAKE_CURRENT_LIST_DIR}/src/IconButton.cpp
@@ -55,6 +57,7 @@ if(KEMU_GUI_TESTS AND WINDOWS_MSVC_X86_64)
         ${CMAKE_CURRENT_LIST_DIR}/tests/FontGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/FullScreenGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/AffinityGuiChecks.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/tests/ShutdownGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/RotationGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/ResizeGuiChecks.cpp
         ${CMAKE_CURRENT_LIST_DIR}/tests/SensorRotationGuiChecks.cpp)

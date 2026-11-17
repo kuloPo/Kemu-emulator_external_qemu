@@ -224,7 +224,6 @@ private:
                                    void (ToolWindow::*)(TouchpadWindow*)>
             mTouchpadWindow;
     std::unique_ptr<Ui::ToolControls> mToolsUi;
-    bool mStartedAdbStopProcess = false;
     ShortcutKeyStore<QtUICommand> mShortcutKeyStore;
     bool mIsExtendedWindowVisibleOnShow = false;
     bool mIsVirtualSceneWindowVisibleOnShow = false;
