@@ -38,6 +38,17 @@
 #include <mmsystem.h>
 #include <objbase.h>
 #include <dsound.h>
+#define COBJMACROS
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <initguid.h>
+
+DEFINE_GUID(CLSID_MMDeviceEnumerator, 0xbcde0395, 0xe52f, 0x467c,
+            0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e);
+DEFINE_GUID(IID_IMMDeviceEnumerator, 0xa95664d2, 0x9614, 0x4f35,
+            0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6);
+DEFINE_GUID(IID_IAudioClient, 0x1cb9ad4c, 0xdbfa, 0x4c32,
+            0xb1, 0x78, 0xc2, 0xf5, 0x68, 0xa7, 0x03, 0xb2);
 
 #include "audio_win_int.h"
 
@@ -52,7 +63,7 @@ typedef struct {
 typedef struct {
     LPDIRECTSOUND dsound;
     LPDIRECTSOUNDCAPTURE dsound_capture;
-    struct audsettings settings;
+    int out_freq;
     DSoundConf conf;
 } dsound;
 
@@ -810,6 +821,64 @@ static DSoundConf glob_conf = {
     .latency_millis     = 10
 };
 
+static int dsound_host_out_frequency(void)
+{
+    IMMDeviceEnumerator *enumerator = NULL;
+    IMMDevice *device = NULL;
+    IAudioClient *client = NULL;
+    WAVEFORMATEX *format = NULL;
+    int frequency = 0;
+    HRESULT hr;
+
+    /* An explicit playback frequency takes precedence over the host default. */
+    if (getenv("QEMU_AUDIO_DAC_FIXED_FREQ")) {
+        return 0;
+    }
+
+    hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_IMMDeviceEnumerator, (void **)&enumerator);
+    if (FAILED(hr)) {
+        goto out;
+    }
+    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender,
+                                                    eConsole, &device);
+    if (FAILED(hr)) {
+        goto out;
+    }
+    hr = IMMDevice_Activate(device, &IID_IAudioClient, CLSCTX_INPROC_SERVER,
+                            NULL, (void **)&client);
+    if (FAILED(hr)) {
+        goto out;
+    }
+    hr = IAudioClient_GetMixFormat(client, &format);
+    if (FAILED(hr)) {
+        goto out;
+    }
+    if (!format || format->nSamplesPerSec < DSBFREQUENCY_MIN ||
+        format->nSamplesPerSec > DSBFREQUENCY_MAX) {
+        hr = E_INVALIDARG;
+        goto out;
+    }
+    frequency = format->nSamplesPerSec;
+
+out:
+    CoTaskMemFree(format);
+    if (client) {
+        IAudioClient_Release(client);
+    }
+    if (device) {
+        IMMDevice_Release(device);
+    }
+    if (enumerator) {
+        IMMDeviceEnumerator_Release(enumerator);
+    }
+    if (FAILED(hr)) {
+        dsound_logerr(hr, "Could not query host playback frequency; "
+                          "using configured frequency\n");
+    }
+    return frequency;
+}
+
 static void dsound_audio_fini (void *opaque)
 {
     HRESULT hr;
@@ -908,6 +977,7 @@ static void *dsound_audio_init (void)
         return NULL;
     }
 
+    s->out_freq = dsound_host_out_frequency();
     return s;
 }
 

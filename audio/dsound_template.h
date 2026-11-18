@@ -175,9 +175,15 @@ static int dsound_init_out(HWVoiceOut *hw, struct audsettings *as,
     DSCBCAPS bc;
 #else
     const char *typ = "DAC";
+    struct audsettings out_as = *as;
     DSoundVoiceOut *ds = (DSoundVoiceOut *) hw;
     DSBUFFERDESC bd;
     DSBCAPS bc;
+
+    if (s->out_freq) {
+        out_as.freq = s->out_freq;
+    }
+    as = &out_as;
 #endif
 
     if (!s->FIELD2) {
