@@ -1278,7 +1278,7 @@ static void add_pen_event(SkinWindow* window,
                           unsigned state) {
     unsigned posX = x;
     unsigned posY = y;
-    uint32_t id = 0;
+    uint32_t id = ev->u.pen.display_id;
 
     const bool not_pixel_fold = !android_foldable_is_pixel_fold();
     if (pen->display) {
@@ -1306,7 +1306,9 @@ static void add_pen_event(SkinWindow* window,
         } else {
             const QAndroidMultiDisplayAgent* const multiDisplayAgent =
                     emulator_window_get()->uiEmuAgent->multiDisplay;
-            multiDisplayAgent->translateCoordination(&posX, &posY, &id);
+            if (!multiDisplayAgent->isMultiDisplayWindow()) {
+                multiDisplayAgent->translateCoordination(&posX, &posY, &id);
+            }
         }
     }
 
@@ -2819,7 +2821,7 @@ void skin_window_process_event(SkinWindow* window, SkinEvent* ev) {
 void skin_window_process_pen_event(SkinWindow* window, SkinEvent* ev) {
     Button* button;
     int mx, my;
-    uint32_t displayId = 0;
+    const uint32_t displayId = ev->u.pen.display_id;
     int button_state = multitouch_create_buttons_state(
             ev->type != kEventPenRelease, ev->u.pen.skip_sync, false);
     FingerState* pen = &window->pen;

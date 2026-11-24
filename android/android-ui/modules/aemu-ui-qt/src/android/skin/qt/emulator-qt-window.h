@@ -274,6 +274,10 @@ public:
     void panHorizontal(bool left);
     void panVertical(bool up);
     void queueSkinEvent(SkinEvent event);
+    void enableAppTabs() { mTabMode = true; }
+    void configureTabTouchSurface(QSize frame);
+    void showTabSurface(int slot, int rotation);
+    void setTabInput(int slot);
     void recenterFocusPoint();
     void saveZoomPoints(const QPoint& focus, const QPoint& viewportFocus);
     void scaleDown();
@@ -692,6 +696,13 @@ private:
     int tiltToRotation(int xTiltDeg, int yTiltDeg);
     int penOrientation(int rotation);
     std::map<uint32_t, std::unique_ptr<MultiDisplayWidget>> mMultiDisplayWindow;
+    bool mTabMode = false;
+    QSize mTabFrame;
+    QRect mTabContent;
+    int mTabSlot = 0;
+    int mTabRotation = 0;
+    int mTabInput = 0;
+    std::map<std::pair<int, int64_t>, SkinEvent> mTabReleases;
     // Putting these last because they both are constructed using *this pointer.
     EmulatorContainer mContainer;
     EmulatorOverlay mOverlay;

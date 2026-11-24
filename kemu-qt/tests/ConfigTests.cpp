@@ -116,6 +116,28 @@ static void checkEngineDiscovery(const kemu::fs::path& temporary) {
             arguments.back() == L"GuestAngle,VulkanBatchedDescriptorSetUpdate,-EncryptUserData,-MultiDisplay",
             "default renderer and single-display features must override the image defaults");
     const auto selinux = std::find(arguments.begin(), arguments.end(), L"-selinux");
+    require(!installed.supportsAppTabs(), "older images must keep desktop mode");
+    std::ofstream(installed.images / "build.prop") << "ro.kemu.app_tabs.version=2\n";
+    require(installed.supportsAppTabs(), "image must advertise the supported tab protocol");
+    auto tabbed = kemu::RuntimeConfig::discover(release, temporary / "local");
+    require(tabbed.appTabs, "compatible images must enable tabs on ordinary startup");
+    tabbed.prepare();
+    require(read(tabbed.avdRoot / "kemu.avd/config.ini").find("hw.multi_display_window=yes") != std::string::npos,
+            "tab mode must use per-display presentation");
+    for (bool encrypted : {false, true}) {
+        std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData=" << (encrypted ? "on" : "off");
+        const auto args = tabbed.arguments();
+        const auto screens = std::find(args.begin(), args.end(), L"-multidisplay");
+        require(screens == args.end(), "tab displays must be allocated when applications open");
+        require(args.back() == (encrypted
+                ? L"GuestAngle,VulkanBatchedDescriptorSetUpdate,EncryptUserData,MultiDisplay"
+                : L"GuestAngle,VulkanBatchedDescriptorSetUpdate,-EncryptUserData,MultiDisplay"),
+                "multi-display must preserve the image encryption setting");
+    }
+    std::ofstream(installed.images / "advancedFeatures.ini") << "EncryptUserData=off\n";
+    installed.prepare();
+    require(read(installed.avdRoot / "kemu.avd/config.ini").find("hw.multi_display_window=no") != std::string::npos,
+            "desktop startup must reset the previous presentation mode");
     require(selinux != arguments.end() && selinux + 1 != arguments.end() &&
             *(selinux + 1) == L"permissive", "the emulator must start with permissive SELinux");
 

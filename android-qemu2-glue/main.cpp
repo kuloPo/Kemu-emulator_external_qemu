@@ -34,6 +34,7 @@
 #include "android/emulation/ConfigDirs.h"
 #include "android/emulation/HostapdController.h"
 #include "android/emulation/LogcatPipe.h"
+#include "android/emulation/KemuTabPipe.h"
 #include "android/emulation/ParameterList.h"
 #include "android/emulation/USBAssist.h"
 #include "android/emulation/compatibility_check.h"
@@ -828,8 +829,10 @@ static void initialize_virtio_input_devs(android::ParameterList& args,
             args.add("-device");
             args.add("virtio-tablet-pci");
         } else if (androidHwConfig_isScreenMultiTouch(hw)) {
-            const int touchDeviceCount =
-                    fc::isEnabled(fc::MultiDisplay) ? VIRTIO_INPUT_MAX_NUM : 1;
+            const char* tabs = getenv("KEMU_APP_TABS_ACTIVE");
+            // The desktop and the focused app each have a touchscreen.
+            const int touchDeviceCount = tabs && strcmp(tabs, "1") == 0 ? 2 :
+                    (fc::isEnabled(fc::MultiDisplay) ? VIRTIO_INPUT_MAX_NUM : 1);
             for (int id = 1; id <= touchDeviceCount; id++) {
                 args.add("-device");
                 args.add(StringFormat("virtio_input_multi_touch_pci_%d", id)
@@ -2068,16 +2071,6 @@ extern "C" int main(int argc, char** argv) {
         }
     }
 
-    for (const ParamList* pl = opts->prop; pl != NULL; pl = pl->next) {
-        if (strncmp(pl->param, "qemu.", 5)) {
-            dwarning(
-                    "unexpected '-prop' value ('%s'), only "
-                    "'qemu.*' properties are supported",
-                    pl->param);
-        }
-        args.add2("-boot-property", pl->param);
-    }
-
     args.add2If("-android-wifi-client-port", opts->wifi_client_port);
     args.add2If("-android-wifi-server-port", opts->wifi_server_port);
 
@@ -2443,6 +2436,19 @@ extern "C" int main(int argc, char** argv) {
         if (fc::isEnabled(fc::VulkanNativeSwapchain)) {
             dprint("Auto-enabled VulkanNativeSwapchain feature");
         }
+    }
+
+    // The presentation backend is resolved before advertising app tabs to Android.
+    for (const ParamList* pl = opts->prop; pl != NULL; pl = pl->next) {
+        if (!strcmp(pl->param, "qemu.kemu.app_tabs=1") && !kemu::appTabsEnabled()) {
+            dinfo("App tabs disabled: the active renderer does not support Vulkan tab presentation.");
+            continue;
+        }
+        if (strncmp(pl->param, "qemu.", 5)) {
+            dwarning("unexpected '-prop' value ('%s'), only 'qemu.*' properties are supported",
+                     pl->param);
+        }
+        args.add2("-boot-property", pl->param);
     }
 
     // Support for changing default lcd-density

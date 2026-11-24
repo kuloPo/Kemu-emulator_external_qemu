@@ -1,4 +1,7 @@
 #include "WindowChrome.h"
+#include "AppTabs.h"
+#include "android/emulation/KemuTabPipe.h"
+#include <QTabBar>
 #include "WindowSizing.h"
 #include "UiFont.h"
 #include "UiLanguage.h"
@@ -131,6 +134,9 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
     brand->setAttribute(Qt::WA_TransparentForMouseEvents);
     brand->setStyleSheet("color: #eef3fa;");
     title->addWidget(brand);
+    if (appTabsEnabled()) {
+        mTabs = new AppTabs(title, container, display);
+    }
     title->addStretch();
     mFullScreenButton = new IconButton(Icon::FullScreen,
         QCoreApplication::translate("Kemu", "Full screen (F11)"), mTitle);
@@ -185,6 +191,10 @@ WindowChrome::WindowChrome(EmulatorContainer* container, EmulatorQtWindow* displ
         }
         connect(button, &QAbstractButton::clicked, this, [this, spec, button] {
             auto* commands = mDisplay->toolWindow();
+            if (mTabs && spec.icon == Icon::Home) {
+                mTabs->home();
+                return;
+            }
             if (spec.icon == Icon::Mute) {
                 button->setEnabled(false);
                 mMute->send([this, button](const QString& error) {
@@ -381,6 +391,7 @@ void WindowChrome::layout() {
     mTitle->setGeometry(border, border, width - 2 * border, 40);
     mSidebar->setGeometry(width - 52 - border, 40 + border, 52, qMax(0, height - 40 - 2 * border));
     mLoading->setGeometry(mContainer->viewport()->geometry());
+    if (mTabs) mTabs->layout();
     if (!mReady || mClosing) mLoading->raise();
     layoutFrameRate();
     mLayoutActive = false;
@@ -725,6 +736,7 @@ bool WindowChrome::eventFilter(QObject* watched, QEvent* event) {
         }
     }
     if (watched == mDisplay && (event->type() == QEvent::Move || event->type() == QEvent::Resize)) {
+        if (mTabs) mTabs->layout();
         layoutFrameRate();
     }
     if (watched == mTitle && !mFullScreen) {
@@ -752,6 +764,7 @@ void WindowChrome::beginClose() {
 #endif
     if (mClosing) return;
     mClosing = true;
+    if (mTabs) mTabs->stop();
     setShowFrameRate(false);
     mBootPoll.stop();
     mResize.stop();
@@ -852,7 +865,9 @@ bool WindowChrome::nativeEvent(void* message, qintptr* result) {
                 return true;
             }
         }
-        if (point.y() <= 40 && !qobject_cast<QAbstractButton*>(mContainer->childAt(point))) {
+        auto* child = mContainer->childAt(point);
+        if (point.y() <= 40 && !qobject_cast<QAbstractButton*>(child) &&
+            !(mTabs && (child == mTabs->bar() || mTabs->bar()->isAncestorOf(child)))) {
             *result = HTCAPTION;
             return true;
         }

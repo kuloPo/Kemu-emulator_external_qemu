@@ -37,6 +37,7 @@ add_subdirectory(legal)
 
 # Built as part of the emulator's existing Qt library and QApplication.
 target_sources(aemu-ui-qt PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/src/AppTabs.cpp
     ${KEMU_LANGUAGE_SOURCES}
     ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/WindowChrome.h

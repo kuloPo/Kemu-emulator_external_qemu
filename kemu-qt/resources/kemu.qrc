@@ -1,1 +1,1 @@
-<RCC><qresource prefix="kemu"><file>kemu.ico</file></qresource></RCC>
+<RCC><qresource prefix="kemu"><file>kemu.ico</file><file>tab-home.svg</file><file>tab-close.svg</file><file>tab-sound.svg</file><file>tab-muted.svg</file></qresource></RCC>

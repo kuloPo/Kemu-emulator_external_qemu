@@ -17,6 +17,7 @@ class QScreen;
 
 namespace kemu {
 class AndroidMute;
+class AppTabs;
 class AndroidRotation;
 class FrameRateMonitor;
 class UpdateController;
@@ -55,6 +56,7 @@ private:
     void layoutFrameRate();
     EmulatorContainer* mContainer;
     EmulatorQtWindow* mDisplay;
+    AppTabs* mTabs = nullptr;
     QWidget* mTitle = nullptr;
     QWidget* mSidebar = nullptr;
     QWidget* mLoading = nullptr;

@@ -17,7 +17,23 @@
 #include "aemu/base/logging/Log.h"
 #include "host-common/MultiDisplayPipe.h"
 #include "host-common/MultiDisplay.h"
+#include "host-common/FeatureControl.h"
+#include "host-common/Features.h"
 #include "host-common/opengles.h"
+#include "android/emulation/KemuTabPipe.h"
+#include "android/console.h"
+#include "android/emulation/control/globals_agent.h"
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <unordered_map>
+#include <mutex>
+
+namespace {
+std::mutex tabFramesMutex;
+std::unordered_map<uint32_t, uint32_t> tabFrames;
+constexpr uint8_t kTabFrame = 5;
+}
 
 namespace android {
 
@@ -42,9 +58,12 @@ MultiDisplayPipe::MultiDisplayPipe(AndroidPipe::Service* service, PipeArgs&& pip
 MultiDisplayPipe::~MultiDisplayPipe() {
     LOG(DEBUG) << "MultiDisplayPipe deleted self " << this;
     sMultiDisplayPipeInstance = NULL;
+    std::lock_guard<std::mutex> lock(tabFramesMutex);
+    tabFrames.clear();
 }
 
 void MultiDisplayPipe::onMessage(const std::vector<uint8_t>& data) {
+    if (data.empty()) return;
     uint8_t cmd = data[0];
     switch (cmd) {
         case QUERY: {
@@ -65,6 +84,21 @@ void MultiDisplayPipe::onMessage(const std::vector<uint8_t>& data) {
                                 << " height " << h << " dpi " << dpi << " flag " << flag;
                 send(std::move(buf));
                 startId = id;
+            }
+            break;
+        }
+        case kTabFrame: {
+            if (data.size() != 9) return;
+            uint32_t slot, buffer;
+            std::memcpy(&slot, data.data() + 1, sizeof(slot));
+            std::memcpy(&buffer, data.data() + 5, sizeof(buffer));
+            {
+                std::lock_guard<std::mutex> lock(tabFramesMutex);
+                if (buffer) tabFrames[slot] = buffer;
+                else tabFrames.erase(slot);
+            }
+            if (buffer && kemu::presentedTab.load(std::memory_order_relaxed) == int(slot)) {
+                getConsoleAgents()->emu->paintMultiDisplayWindow(slot, buffer);
             }
             break;
         }
@@ -142,7 +176,114 @@ MultiDisplayPipe* MultiDisplayPipe::getInstance() {
 }
 } // namespace android
 
+namespace {
+class TabPipe final : public android::AndroidAsyncMessagePipe {
+public:
+    using Service = android::AndroidAsyncMessagePipe::Service<TabPipe>;
+    static Service* service;
+    static std::mutex mutex;
+    static android::AsyncMessagePipeHandle active;
+    static std::optional<std::string> snapshot;
+    static std::unordered_map<std::string, std::string> icons;
+
+    TabPipe(android::AndroidPipe::Service* owner, PipeArgs&& args)
+        : AndroidAsyncMessagePipe(owner, std::move(args)) {}
+    ~TabPipe() override {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active == getHandle()) {
+            active = {};
+            snapshot = std::string();
+            icons.clear();
+        }
+    }
+    void onMessage(const std::vector<uint8_t>& data) override {
+        if (data.empty()) return;
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active.isValid() && !(active == getHandle())) return;
+        active = getHandle();
+        if (data.front() == 'I') {
+            // I, NUL-terminated session token, PNG (empty on tab close).
+            auto end = std::find(data.begin() + 1, data.end(), 0);
+            if (end == data.end() || end == data.begin() + 1) return;
+            std::string token(data.begin() + 1, end);
+            if (++end == data.end()) {
+                icons.erase(token);
+            } else {
+                icons[token].assign(end, data.end());
+            }
+            return;
+        }
+        snapshot.emplace(data.begin(), data.end());
+    }
+};
+TabPipe::Service* TabPipe::service = nullptr;
+std::mutex TabPipe::mutex;
+android::AsyncMessagePipeHandle TabPipe::active;
+std::optional<std::string> TabPipe::snapshot;
+std::unordered_map<std::string, std::string> TabPipe::icons;
+}
+
+std::atomic<int> kemu::presentedTab{-1};
+namespace {
+std::mutex viewMutex;
+gfxstream_display_view presentation{-1};
+}
+
+bool kemu::setPresentationView(const gfxstream_display_view& view) {
+    std::lock_guard<std::mutex> lock(viewMutex);
+    if (!memcmp(&view, &presentation, sizeof(view))) return false;
+    presentation = view;
+    presentedTab.store(view.slot, std::memory_order_relaxed);
+    return true;
+}
+
+bool kemu::getPresentationView(gfxstream_display_view* view) {
+    if (presentedTab.load(std::memory_order_relaxed) < 0) return false;
+    std::lock_guard<std::mutex> lock(viewMutex);
+    *view = presentation;
+    if (view->slot > 0) {
+        std::lock_guard<std::mutex> frames(tabFramesMutex);
+        auto it = tabFrames.find(view->slot);
+        view->colorBuffer = it == tabFrames.end() ? 0 : it->second;
+    }
+    return true;
+}
+
+std::optional<std::string> kemu::takeTabSnapshot() {
+    std::lock_guard<std::mutex> lock(TabPipe::mutex);
+    return std::exchange(TabPipe::snapshot, std::nullopt);
+}
+
+std::string kemu::tabIconPng(const std::string& token) {
+    std::lock_guard<std::mutex> lock(TabPipe::mutex);
+    auto it = TabPipe::icons.find(token);
+    return it == TabPipe::icons.end() ? std::string() : it->second;
+}
+
+void kemu::sendTabCommand(const std::string& message) {
+    android::AsyncMessagePipeHandle handle;
+    {
+        std::lock_guard<std::mutex> lock(TabPipe::mutex);
+        handle = TabPipe::active;
+    }
+    if (!handle.isValid()) return;
+    auto ref = TabPipe::service->getPipe(handle);
+    if (ref) ref.value().pipe->send({message.begin(), message.end()});
+}
+
+bool kemu::appTabsEnabled() {
+    const char* enabled = std::getenv("KEMU_APP_TABS_ACTIVE");
+    return enabled && !std::strcmp(enabled, "1") &&
+           android::featurecontrol::isEnabled(android::featurecontrol::Vulkan) &&
+           android::featurecontrol::isEnabled(android::featurecontrol::VulkanNativeSwapchain);
+}
+
 void android_init_multi_display_pipe() {
+    if (kemu::appTabsEnabled()) {
+        auto service = std::make_unique<TabPipe::Service>("kemu-app-tabs-v2");
+        TabPipe::service = service.get();
+        android::AndroidPipe::Service::add(std::move(service));
+    }
     android::AndroidPipe::Service::add(
         std::make_unique<android::MultiDisplayPipe::Service>("multidisplay"));
 }

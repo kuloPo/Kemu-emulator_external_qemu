@@ -12,6 +12,8 @@
 
 #include "android/skin/qt/emulator-qt-window.h"
 #include "WindowChrome.h"
+#include "android/emulation/KemuTabPipe.h"
+#include "host-common/opengles.h"
 #include "AndroidShutdown.h"
 
 #include "aemu/base/Optional.h"
@@ -1995,8 +1997,8 @@ void EmulatorQtWindow::handleTouchPoints(const QTouchEvent& touch,
         }
         if (eventSet) {
             bool lasElementFound = false;
-            skin_event.u.multi_touch_point.x = elem.pos().x();
-            skin_event.u.multi_touch_point.y = elem.pos().y();
+            skin_event.u.multi_touch_point.x = elem.position().x();
+            skin_event.u.multi_touch_point.y = elem.position().y();
             skin_event.u.multi_touch_point.x_global = elem.screenPos().x();
             skin_event.u.multi_touch_point.y_global = elem.screenPos().y();
             skin_event.u.multi_touch_point.id = elem.id();
@@ -2294,6 +2296,21 @@ void EmulatorQtWindow::pollEvent(SkinEvent* event, bool* hasEvent) {
     }
 }
 
+void EmulatorQtWindow::setTabInput(int slot) {
+    const std::lock_guard<std::mutex> lock(mSkinEventQueueMtx);
+    if (slot == mTabInput) return;
+    for (auto& [identity, release] : mTabReleases) {
+        mSkinEventQueue.push_back(release);
+    }
+    if (!mTabReleases.empty()) {
+        mToolWindow->getUiEmuAgent()->userEvents->onNewUserEvent();
+        mTabReleases.clear();
+    }
+    mHeldModifiers.clear();
+    mMouseTouchState = TouchState::NOT_TOUCHING;
+    mTabInput = slot;
+}
+
 void EmulatorQtWindow::queueSkinEvent(SkinEvent event) {
     const auto eventType = event.type;
     const auto rotationEventLayout =
@@ -2302,6 +2319,81 @@ void EmulatorQtWindow::queueSkinEvent(SkinEvent event) {
                     : kNullopt;
 
     const std::lock_guard<std::mutex> lock(mSkinEventQueueMtx);
+    if (mTabMode) {
+        auto mapPoint = [&](int& x, int& y, uint32_t& display, bool pressed) {
+            if (mTabInput <= 0 || display != 0) return true;
+            if (!mBackingSurface || mTabFrame.isEmpty() || mTabContent.isEmpty()) return false;
+            if (pressed && !mTabContent.contains(x, y)) return false;
+            const double u = qBound(0., double(x - mTabContent.x()) / mTabContent.width(), 1.);
+            const double v = qBound(0., double(y - mTabContent.y()) / mTabContent.height(), 1.);
+            QPointF uv(u, v);
+            if (mTabRotation == 1) uv = QPointF(1 - v, u);
+            if (mTabRotation == 2) uv = QPointF(1 - u, 1 - v);
+            if (mTabRotation == 3) uv = QPointF(v, 1 - u);
+            const QSize frame = mTabFrame;
+            const QSize bitmap = mBackingSurface->bitmap->size();
+            x = qMin(frame.width() - 1, int(uv.x() * frame.width())) * mBackingSurface->w / bitmap.width();
+            y = qMin(frame.height() - 1, int(uv.y() * frame.height())) * mBackingSurface->h / bitmap.height();
+            display = 1;  // Shared virtio touchscreen, associated by the guest.
+            return true;
+        };
+        int64_t id = 0;
+        SkinEventType up = eventType;
+        switch (eventType) {
+        case kEventTextInput:
+            if (mTabInput < 0) return;
+            break;
+        case kEventKeyDown: case kEventKeyUp:
+            id = event.u.key.keycode;
+            up = kEventKeyUp;
+            break;
+        case kEventMouseMotion: case kEventMouseButtonDown: case kEventMouseButtonUp:
+            if (!mapPoint(event.u.mouse.x, event.u.mouse.y, event.u.mouse.display_id,
+                          eventType == kEventMouseButtonDown)) return;
+            id = event.u.mouse.button;
+            up = kEventMouseButtonUp;
+            break;
+        case kEventTouchBegin: case kEventTouchUpdate: case kEventTouchEnd:
+            if (!mapPoint(event.u.multi_touch_point.x, event.u.multi_touch_point.y,
+                          event.u.multi_touch_point.display_id, eventType == kEventTouchBegin)) return;
+            id = event.u.multi_touch_point.id;
+            up = kEventTouchEnd;
+            break;
+        case kEventPenPress: case kEventPenMove: case kEventPenRelease:
+            if (!mapPoint(event.u.pen.x, event.u.pen.y, event.u.pen.display_id,
+                          eventType == kEventPenPress)) return;
+            id = event.u.pen.tracking_id;
+            up = kEventPenRelease;
+            break;
+        case kEventMouseWheel:
+            // The native wheel device has no per-display destination.
+            if (mTabInput != 0) return;
+            break;
+        default: break;
+        }
+        if (up == kEventMouseButtonUp || up == kEventKeyUp || up == kEventTouchEnd ||
+            up == kEventPenRelease) {
+            if (mTabInput < 0) return;
+            const auto key = std::make_pair(int(up), id);
+            if (eventType == up) {
+                if (!mTabReleases.erase(key)) return;
+            } else if ((eventType != kEventMouseMotion && eventType != kEventTouchUpdate &&
+                        eventType != kEventPenMove)
+                       || mTabReleases.count(key)) {
+                auto release = event;
+                release.type = up;
+                if (up == kEventTouchEnd) {
+                    release.u.multi_touch_point.pressure = 0;
+                    release.u.multi_touch_point.skip_sync = false;
+                } else if (up == kEventPenRelease) {
+                    release.u.pen.pressure = 0;
+                    release.u.pen.button_pressed = false;
+                    release.u.pen.skip_sync = false;
+                }
+                mTabReleases[key] = release;
+            }
+        }
+    }
     const bool firstEvent = mSkinEventQueue.empty();
 
     // For the following events, only the "last" example of said event
@@ -4222,6 +4314,7 @@ bool EmulatorQtWindow::addMultiDisplayWindow(uint32_t id,
                                              uint32_t w,
                                              uint32_t h) {
     SkinEvent skin_event;
+    if (mTabMode) return true;
     if (add) {
         QRect windowGeo = this->geometry();
         if (!mBackingSurface) {
@@ -4274,12 +4367,45 @@ bool EmulatorQtWindow::addMultiDisplayWindow(uint32_t id,
     return true;
 }
 
+void EmulatorQtWindow::configureTabTouchSurface(QSize frame) {
+    if (frame.isEmpty() || frame == mTabFrame) return;
+    if (!mTabFrame.isEmpty()) {
+        auto remove = createSkinEvent(kEventRemoveDisplay);
+        remove.u.remove_display.id = 1;
+        queueSkinEvent(remove);
+    }
+    auto add = createSkinEvent(kEventAddDisplay);
+    add.u.add_display.id = 1;
+    add.u.add_display.width = frame.width();
+    add.u.add_display.height = frame.height();
+    queueSkinEvent(add);
+    mTabFrame = frame;
+}
+
+void EmulatorQtWindow::showTabSurface(int slot, int rotation) {
+    if (!mTabMode) return;
+    mTabSlot = slot;
+    mTabRotation = rotation;
+    const QSize frame = slot > 0 ? mTabFrame : QSize();
+    const QSize oriented = rotation % 2 ? frame.transposed() : frame;
+    const QSize fit = oriented.isEmpty() ? size() : oriented.scaled(size(), Qt::KeepAspectRatio);
+    mTabContent = QRect(QPoint((width() - fit.width()) / 2, (height() - fit.height()) / 2), fit);
+    if (kemu::setPresentationView({slot, rotation, width(), height(), mTabContent.x(),
+                                   mTabContent.y(), fit.width(), fit.height()}) && mBackingSurface) {
+        android_redrawOpenglesWindow();
+    }
+}
+
 bool EmulatorQtWindow::paintMultiDisplayWindow(uint32_t id, uint32_t texture) {
-    if (mMultiDisplayWindow[id] == nullptr ||
-        mMultiDisplayWindow[id]->isHidden()) {
+    if (mTabMode) {
+        if (int(id) == mTabSlot && id) android_redrawOpenglesWindow();
         return true;
     }
-    mMultiDisplayWindow[id]->paintWindow(texture);
+    auto it = mMultiDisplayWindow.find(id);
+    if (it == mMultiDisplayWindow.end() || !it->second || it->second->isHidden()) {
+        return true;
+    }
+    it->second->paintWindow(texture);
     return true;
 }
 

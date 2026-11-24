@@ -45,6 +45,7 @@
 #include "host-common/FeatureControl.h"
 #include "host-common/Features.h"
 #include "host-common/MultiDisplayPipe.h"
+#include "android/emulation/KemuTabPipe.h"
 #include "host-common/misc.h"
 #include "host-common/screen-recorder.h"
 #include "host-common/opengles.h"                             // for android_redrawOpenglesWindow
@@ -982,6 +983,9 @@ int MultiDisplay::setDisplayColorBuffer(uint32_t displayId,
             mWindowAgent->setUIDisplayRegion(0, 0, width, height, true);
         }
         fireEvent(DisplayChangeEvent{DisplayChange::DisplayChanged, displayId});
+    }
+    if (displayId > 0 && kemu::presentedTab.load(std::memory_order_relaxed) == int(displayId)) {
+        mWindowAgent->paintMultiDisplayWindow(displayId, colorBuffer);
     }
     LOG(VERBOSE) << "setDisplayColorBuffer " << displayId << " cb "
                  << colorBuffer;

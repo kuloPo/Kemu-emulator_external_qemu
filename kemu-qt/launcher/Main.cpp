@@ -88,7 +88,7 @@ void moveDisk(const kemu::RuntimeConfig& config, HANDLE lease) {
 int launch() {
     std::wstring module(32768, L'\0');
     module.resize(GetModuleFileNameW(nullptr, module.data(), DWORD(module.size())));
-    const auto config = kemu::RuntimeConfig::discover(kemu::fs::path(module).parent_path(), environment(L"LOCALAPPDATA"));
+    auto config = kemu::RuntimeConfig::discover(kemu::fs::path(module).parent_path(), environment(L"LOCALAPPDATA"));
     if (kemu::fs::exists(config.engine / ".kemu-update-pending")) {
         const auto updater = config.engine / "KemuUpdater.exe";
         auto command = kemu::quoteArgument(updater.wstring()) + L" --recover " + kemu::quoteArgument(config.engine.wstring());
@@ -117,6 +117,7 @@ int launch() {
     setEnv(L"ANDROID_EMULATOR_HOME", (config.avdRoot / "emulator-home").wstring());
     setEnv(L"ANDROID_EMULATOR_LAUNCHER_DIR", config.engine.wstring());
     setEnv(L"KEMU_UI", L"1");
+    setEnv(L"KEMU_APP_TABS_ACTIVE", config.appTabs ? L"1" : L"0");
     setEnv(L"KEMU_INSTALL_ROOT", config.engine.wstring());
     setEnv(L"KEMU_INSTANCE", instance);
     setEnv(L"KEMU_INSTANCE_HANDLE", std::to_wstring(reinterpret_cast<uintptr_t>(lease.value)));
