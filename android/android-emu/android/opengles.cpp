@@ -10,6 +10,7 @@
 ** GNU General Public License for more details.
 */
 
+#include "android/emulation/KemuTabPipe.h"
 #include "host-common/opengles.h"
 #include "android/opengles-overrides.h"
 #include "android/cmdline-definitions.h"
@@ -586,6 +587,7 @@ static int startOpenglesRendererImpl(
         .set_color_transform_matrix = multi_display_agent->setDisplayColorTransform,
         .get_display_power_mode = multi_display_agent->getDisplayPowerMode,
         .set_display_power_mode = multi_display_agent->setDisplayPowerMode,
+        .get_presentation_view = kemu::getPresentationView,
     });
 
     sRenderer = sRenderLib->initRenderer(width, height, gfxstreamFeatures,

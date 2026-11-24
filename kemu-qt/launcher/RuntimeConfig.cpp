@@ -60,6 +60,7 @@ RuntimeConfig RuntimeConfig::discover(const fs::path& applicationDir, const fs::
     c.avdRoot = localAppData / "Kemu/Kemu/avd";
     c.logs = localAppData / "Kemu/Kemu/logs";
     c.performance = PerformanceConfig::load(c.avdRoot / "performance.ini");
+    c.appTabs = c.supportsAppTabs();
     return c;
 }
 
@@ -113,6 +114,15 @@ void updateIni(const fs::path& path, const std::map<std::string, std::string>& v
     }
 }
 
+bool RuntimeConfig::supportsAppTabs() const {
+    std::ifstream properties(images / "build.prop");
+    std::string line;
+    while (std::getline(properties, line)) {
+        if (trim(line) == "ro.kemu.app_tabs.version=2") return true;
+    }
+    return false;
+}
+
 void RuntimeConfig::prepare() const {
     const auto avd = avdRoot / "kemu.avd";
     fs::create_directories(avd);
@@ -134,6 +144,7 @@ void RuntimeConfig::prepare() const {
             {"fastboot.forceColdBoot","yes"}, {"userdata.useQcow2","no"},
             {"skin.dynamic","no"}, {"skin.name",size},
             {"skin.path",size}, {"image.sysdir.1",utf8(images.wstring())}}) values[key] = value;
+    values["hw.multi_display_window"] = appTabs ? "yes" : "no";
     updateIni(ini, values);
     updateIni(avdRoot / "kemu.ini", {{"avd.ini.encoding","UTF-8"}, {"path",utf8(avd.wstring())},
                                      {"path.rel","avd/kemu.avd"}, {"target","android-36"}});
@@ -142,9 +153,9 @@ void RuntimeConfig::prepare() const {
 std::vector<std::wstring> RuntimeConfig::arguments() const {
     // Pin the image's encryption setting so user/environment feature overrides cannot
     // enable encryption after validation skipped its key, or disable an encrypted image.
-    const auto features = imageEncryptionEnabled(images) ?
-        L"GuestAngle,VulkanBatchedDescriptorSetUpdate,EncryptUserData,-MultiDisplay" :
-        L"GuestAngle,VulkanBatchedDescriptorSetUpdate,-EncryptUserData,-MultiDisplay";
+    std::wstring features = L"GuestAngle,VulkanBatchedDescriptorSetUpdate,";
+    features += imageEncryptionEnabled(images) ? L"EncryptUserData" : L"-EncryptUserData";
+    features += appTabs ? L",MultiDisplay" : L",-MultiDisplay";
     std::vector<std::wstring> result{L"-avd", L"kemu", L"-sysdir", images.wstring(), L"-port", L"5554",
             L"-cores", std::to_wstring(performance.cores), L"-memory", std::to_wstring(performance.ramGb * 1024), L"-gpu", L"auto", L"-no-snapshot",
             L"-no-boot-anim", L"-no-metrics", L"-crash-report-mode", L"never",
@@ -152,6 +163,9 @@ std::vector<std::wstring> RuntimeConfig::arguments() const {
             L"-feature", features};
     if (fs::exists(storage::locationPath(avdRoot)))
         result.insert(result.end() - 2, {L"-data",storage::imagePath(avdRoot).wstring()});
+    if (appTabs) {
+        result.insert(result.end() - 2, {L"-prop", L"qemu.kemu.app_tabs=1"});
+    }
     return result;
 }
 }  // namespace kemu

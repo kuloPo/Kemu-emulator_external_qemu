@@ -10,6 +10,8 @@ namespace fs = std::filesystem;
 struct RuntimeConfig {
     fs::path engine, images, avdRoot, logs;
     PerformanceConfig performance;
+    bool appTabs = false;
+    bool supportsAppTabs() const;
     static RuntimeConfig discover(const fs::path& applicationDir, const fs::path& localAppData);
     void validate() const;
     void prepare() const;

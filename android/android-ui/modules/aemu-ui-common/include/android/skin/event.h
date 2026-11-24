@@ -101,6 +101,7 @@ typedef struct {
 
 typedef struct {
     int64_t tracking_id;
+    uint32_t display_id;
     int x;
     int y;
     int x_global;

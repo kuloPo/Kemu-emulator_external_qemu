@@ -4,6 +4,18 @@
 <context>
     <name>Kemu</name>
     <message>
+        <source>Mute tab</source>
+        <translation>将此标签静音</translation>
+    </message>
+    <message>
+        <source>Unmute tab</source>
+        <translation>恢复此标签声音</translation>
+    </message>
+    <message>
+        <source>Desktop</source>
+        <translation>桌面</translation>
+    </message>
+    <message>
         <source>Install APK</source>
         <translation>安装 APK</translation>
     </message>
