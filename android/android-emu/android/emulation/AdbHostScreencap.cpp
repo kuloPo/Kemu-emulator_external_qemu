@@ -25,6 +25,7 @@
 #include "aemu/base/sockets/SocketUtils.h"
 #include "aemu/base/threads/WorkerThread.h"
 #include "android/console.h"
+#include "android/emulation/KemuTabPipe.h"
 #include "host-common/VmLock.h"
 #include "host-common/multi_display_agent.h"
 #include "host-common/opengles.h"
@@ -148,13 +149,27 @@ std::optional<AdbHostScreencap::Request> AdbHostScreencap::parse(std::string_vie
 }
 
 // static
-std::string AdbHostScreencap::capture() {
+AdbHostScreencap::Reply AdbHostScreencap::capture() {
+    const auto renderer = android_getOpenglesRenderer();
+    gfxstream_display_view view{};
+    if (kemu::getPresentationView(&view) && view.slot > 0) {
+        // App tabs publish buffers directly. Their slot and Android display ID
+        // are both independent of the renderer's physical display IDs.
+        if (!renderer || !view.colorBuffer) return std::string{};
+        const int rotation = (4 - view.rotation) % 4;
+        auto frame = capture(std::nullopt, [&](auto* width, auto* height, auto* pixels, auto* size) {
+            return renderer->getColorBufferFrame(view.colorBuffer, rotation, width, height, pixels, size);
+        });
+        gfxstream_display_view current{};
+        if (!kemu::getPresentationView(&current) || current.slot != view.slot ||
+            current.rotation != view.rotation || !current.colorBuffer) return std::string{};
+        return frame;
+    }
     std::optional<GuestDisplay> display;
     {
         std::lock_guard<std::mutex> lock(sDisplayLock);
         display = sDisplay;
     }
-    const gfxstream::RendererPtr renderer = android_getOpenglesRenderer();
     // The host frame includes the display's color transform, which screenshots
     // in the guest leave out. It is checked on both sides of the readback.
     if (!display || !renderer || hasColorTransform()) {
@@ -169,14 +184,13 @@ std::string AdbHostScreencap::capture() {
                 return renderer->getScreenshot(4, width, height, pixels, size, 0, 0, 0,
                                                rotation);
             });
-    if (hasColorTransform()) {
-        return {};
-    }
+    if (kemu::getPresentationView(&view) && view.slot > 0) return std::string{};
+    if (frame.empty() || hasColorTransform()) return std::nullopt;
     return frame;
 }
 
 // static
-std::string AdbHostScreencap::capture(const GuestDisplay& display, const Screenshot& screenshot) {
+std::string AdbHostScreencap::capture(std::optional<GuestDisplay> display, const Screenshot& screenshot) {
     unsigned int width = 0;
     unsigned int height = 0;
     size_t size = 0;
@@ -184,11 +198,13 @@ std::string AdbHostScreencap::capture(const GuestDisplay& display, const Screens
         gfxstream::Renderer::GET_SCREENSHOT_RESULT_PIXELS_SIZE) {
         return {};
     }
+    if (!size || size > std::string().max_size() - kScreencapHeaderSize) return {};
     std::string out(kScreencapHeaderSize + size, '\0');
     if (screenshot(&width, &height, reinterpret_cast<uint8_t*>(&out[kScreencapHeaderSize]),
                    &size) != 0 ||
-        static_cast<int>(width) != display.width ||
-        static_cast<int>(height) != display.height || size != size_t{4} * width * height) {
+        (display && (static_cast<int>(width) != display->width ||
+                     static_cast<int>(height) != display->height)) ||
+        !width || !height || size != size_t{4} * width * height) {
         return {};
     }
     // The frame can have shrunk since the size was queried.
@@ -292,16 +308,17 @@ void AdbHostScreencap::serve(const Request& request, std::function<void(Reply)> 
     }();
     worker->enqueue([request, done = std::move(done)]() mutable {
         Reply reply;
-        const std::string frame = capture();
-        if (frame.empty()) {
-            // Left to the guest.
-        } else if (request.output == Request::Output::Netcat) {
-            if (sendToLoopback(request.port, frame)) {
+        const auto frame = capture();
+        if (frame && request.output == Request::Output::Netcat) {
+            if (sendToLoopback(request.port, *frame)) {
                 reply.emplace();
             }
-        } else if (std::string compressed = gzip(frame); !compressed.empty()) {
-            reply = std::move(compressed);
+        } else if (frame && !frame->empty()) {
+            if (auto compressed = gzip(*frame); !compressed.empty()) reply = std::move(compressed);
         }
+        // Guest screencap without -d reads the desktop. During a tab switch
+        // return an empty stream so a polling client can request a fresh frame.
+        if (!reply && (kemu::presentedTab.load() > 0 || (frame && frame->empty()))) reply.emplace();
         base::ThreadLooper::runOnMainLooper(
                 [done = std::move(done), reply = std::move(reply)]() mutable {
                     android::RecursiveScopedVmLock lock;

@@ -21,12 +21,8 @@ namespace emulation {
 // client polling `screencap` does not pay for a guest capture, compression and
 // transfer on every frame. All other traffic is relayed unchanged.
 //
-// Only the services accepted by parse() are answered, and only while the host
-// frame is known to equal what the guest's screencap would print: the guest
-// must have reported its display state, the host frame must have the reported
-// size, and the host must not apply a color transform to the display. In
-// every other case the stream is handed to the guest as if this class was not
-// there.
+// The default display uses the guest-reported geometry. An active Kemu app
+// tab supplies its own frame and rotation.
 //
 // An instance must be used and destroyed with the VM lock held.
 class AdbHostScreencap {
@@ -69,9 +65,9 @@ public:
     // The Server used on a live transport. Works on a separate thread.
     static void serve(const Request& request, std::function<void(Reply)> done);
 
-    // Returns what `screencap` prints for the current frame, or an empty
-    // string if the host frame cannot stand in for it.
-    static std::string capture();
+    // An empty frame means the selected tab is not ready. Only a desktop
+    // capture can fall back to the guest's default display (nullopt).
+    static Reply capture();
 
     // Reads the host frame as Renderer::getScreenshot() does for one display
     // and rotation: with null |pixels| it only reports the size it needs.
@@ -80,7 +76,7 @@ public:
 
     // Returns what `screencap` prints for the frame |screenshot| reads, or an
     // empty string if that frame does not have the size of |display|.
-    static std::string capture(const GuestDisplay& display, const Screenshot& screenshot);
+    static std::string capture(std::optional<GuestDisplay> display, const Screenshot& screenshot);
 
     // Returns |data| as a single gzip member.
     static std::string gzip(std::string_view data);
