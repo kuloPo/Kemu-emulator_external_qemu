@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "android/emulation/KemuTabPipe.h"
 #include "render-utils/Renderer.h"
 
 namespace android {
@@ -21,6 +22,7 @@ namespace {
 constexpr uint32_t kHostId = 7;
 constexpr uint32_t kMaxPayload = 4096;
 constexpr char kGzipService[] = "exec:screencap | gzip -1";
+using GuestDisplay = AdbHostScreencap::GuestDisplay;
 
 std::string packet(uint32_t command, uint32_t arg0, uint32_t arg1, const std::string& payload = {}) {
     amessage header;
@@ -162,7 +164,7 @@ TEST(AdbHostScreencap, gzip) {
 
 TEST(AdbHostScreencap, captureWritesFinalFrame) {
     // The frame shrinks between the size query and the readback.
-    const std::string frame = AdbHostScreencap::capture({0, 2, 2}, frames({{4, 4}, {2, 2}}));
+    const std::string frame = AdbHostScreencap::capture(GuestDisplay{0, 2, 2}, frames({{4, 4}, {2, 2}}));
     const uint32_t header[] = {2, 2, 1, 1};
     std::string expected(reinterpret_cast<const char*>(header), sizeof(header));
     for (int i = 0; i < 4; i++) {
@@ -172,9 +174,26 @@ TEST(AdbHostScreencap, captureWritesFinalFrame) {
 }
 
 TEST(AdbHostScreencap, captureRejectsOtherFrames) {
-    EXPECT_TRUE(AdbHostScreencap::capture({0, 2, 2}, frames({{4, 4}})).empty());
-    EXPECT_TRUE(AdbHostScreencap::capture({0, 2, 2}, frames({{2, 2}, {4, 4}})).empty());
-    EXPECT_TRUE(AdbHostScreencap::capture({1, 2, 4}, frames({{4, 2}})).empty());
+    EXPECT_TRUE(AdbHostScreencap::capture(GuestDisplay{0, 2, 2}, frames({{4, 4}})).empty());
+    EXPECT_TRUE(AdbHostScreencap::capture(GuestDisplay{0, 2, 2}, frames({{2, 2}, {4, 4}})).empty());
+    EXPECT_TRUE(AdbHostScreencap::capture(GuestDisplay{1, 2, 4}, frames({{4, 2}})).empty());
+}
+
+TEST(AdbHostScreencap, tabFrameUsesItsOwnSize) {
+    const auto frame = AdbHostScreencap::capture(std::nullopt, frames({{2, 4}}));
+    const uint32_t header[] = {2, 4, 1, 1};
+    ASSERT_EQ(sizeof(header) + 2 * 4 * 4, frame.size());
+    EXPECT_EQ(0, memcmp(frame.data(), header, sizeof(header)));
+}
+
+TEST(AdbHostScreencap, pendingTabDoesNotFallBackToLauncher) {
+    gfxstream_display_view previous{-1};
+    kemu::getPresentationView(&previous);
+    kemu::setPresentationView({1});
+    const auto frame = AdbHostScreencap::capture();
+    kemu::setPresentationView(previous);
+    ASSERT_TRUE(frame.has_value());
+    EXPECT_TRUE(frame->empty());
 }
 
 TEST_F(AdbHostScreencapTest, relaysOtherTraffic) {
