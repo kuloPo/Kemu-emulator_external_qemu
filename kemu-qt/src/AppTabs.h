@@ -15,15 +15,19 @@ class QToolButton;
 class QWidget;
 
 namespace kemu {
+class DesktopFocusCheck;
 class AppTabs final : public QObject {
 public:
     AppTabs(QHBoxLayout* title, QWidget* container, EmulatorQtWindow* display);
+    ~AppTabs() override;
     QTabBar* bar() const { return mBar; }
     void layout();
     void home();
     void stop();
 
 private:
+    void checkDesktopFocus(bool openHome);
+    void cancelDesktopCheck();
     void receive();
     void request(const char* operation, const QJsonObject& tab);
     void updateTabs(const QJsonArray& tabs);
@@ -44,5 +48,7 @@ private:
     int mActive = 0;
     int mRotation = 0;
     QTimer mPoll;
+    QTimer mDesktopRetry;
+    DesktopFocusCheck* mDesktopCheck = nullptr;
 };
 }
