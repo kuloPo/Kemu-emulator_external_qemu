@@ -1,5 +1,6 @@
 #include "AppTabs.h"
 #include "android/emulation/KemuTabPipe.h"
+#include "android/emulation/control/adb/AdbConnection.h"
 #include "android/skin/qt/emulator-qt-window.h"
 
 #include <QCoreApplication>
@@ -15,8 +16,58 @@
 #include <QStyle>
 #include <QStyleOptionTab>
 #include <QToolButton>
+#include <QThread>
+#include <chrono>
+#include <mutex>
 
 namespace kemu {
+// The tab provider can be unavailable while another display still owns the keyboard.
+class DesktopFocusCheck final : public QThread {
+public:
+    DesktopFocusCheck(bool openHome, QObject* parent) : QThread(parent), mOpenHome(openHome) {}
+    bool focused = false;
+
+    void cancel() {
+        requestInterruption();
+        std::lock_guard<std::mutex> lock(mMutex);
+        if (mStream) mStream->close();
+    }
+
+private:
+    void run() override {
+        using namespace std::chrono_literals;
+        auto connection = android::emulation::AdbConnection::connection(1000ms);
+        if (!connection || isInterruptionRequested()) return;
+        auto stream = connection->open("shell:sh", 1000ms);
+        if (!stream || !stream->good()) return;
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            if (isInterruptionRequested()) { stream->close(); return; }
+            mStream = stream;
+        }
+        stream->setWriteTimeout(1000ms);
+        if (mOpenHome) {
+            *stream << "am start --display 0 -a android.intent.action.MAIN "
+                       "-c android.intent.category.HOME >/dev/null\n";
+        }
+        *stream << "dumpsys window | grep -m1 'mTopFocusedDisplayId='; exit\n" << std::flush;
+        QByteArray line;
+        char ch;
+        while (stream->read(&ch, 1)) {
+            if (ch == '\n') {
+                if (line.trimmed() == "mTopFocusedDisplayId=0") focused = true;
+                line.clear();
+            } else {
+                line.append(ch);
+            }
+        }
+        stream->close();
+    }
+    const bool mOpenHome;
+    std::mutex mMutex;
+    std::shared_ptr<android::emulation::AdbStream> mStream;
+};
+
 class ApplicationTabBar final : public QTabBar {
 public:
     ApplicationTabBar(QToolButton* desktop, QWidget* parent)
@@ -55,7 +106,6 @@ AppTabs::AppTabs(QHBoxLayout* title, QWidget* container, EmulatorQtWindow* displ
     mDesktop->setFocusPolicy(Qt::NoFocus);
     mDesktop->setCheckable(true);
     mDesktop->setChecked(true);
-    mDesktop->setEnabled(false);
     mDesktop->setFixedSize(28, 28);
     mDesktop->setIcon(QIcon(":/kemu/tab-home.svg"));
     mDesktop->setIconSize(QSize(16, 16));
@@ -94,6 +144,8 @@ AppTabs::AppTabs(QHBoxLayout* title, QWidget* container, EmulatorQtWindow* displ
     connect(mBar, &QTabBar::tabBarClicked, this, select);
     connect(mBar, &QTabBar::currentChanged, this, select);
     connect(&mPoll, &QTimer::timeout, this, &AppTabs::receive);
+    mDesktopRetry.setInterval(1000);
+    connect(&mDesktopRetry, &QTimer::timeout, this, [this] { checkDesktopFocus(false); });
     mPoll.start(20);
 }
 
@@ -121,7 +173,47 @@ void AppTabs::request(const char* operation, const QJsonObject& tab) {
     sendTabCommand(QJsonDocument(command).toJson(QJsonDocument::Compact).toStdString());
 }
 
-void AppTabs::home() { request("home", QJsonObject{{"slot", 0}}); }
+AppTabs::~AppTabs() {
+    cancelDesktopCheck();
+    for (auto* thread : findChildren<QThread*>(QString(), Qt::FindDirectChildrenOnly)) thread->wait();
+}
+
+void AppTabs::cancelDesktopCheck() {
+    if (!mDesktopCheck) return;
+    mDesktopCheck->cancel();
+    mDesktopCheck = nullptr;
+}
+
+void AppTabs::checkDesktopFocus(bool openHome) {
+    if (!mEpoch.isEmpty() || !mPoll.isActive()) return;
+    if (mDesktopCheck) {
+        if (!openHome) return;
+        cancelDesktopCheck();
+    }
+    auto* check = new DesktopFocusCheck(openHome, this);
+    mDesktopCheck = check;
+    connect(check, &QThread::finished, this, [this, check] {
+        if (mDesktopCheck == check) {
+            mDesktopCheck = nullptr;
+            mDisplay->setTabInput(check->focused ? 0 : -1);
+        }
+        check->deleteLater();
+    });
+    QTimer::singleShot(3000, check, [check] { check->cancel(); });
+    check->start();
+}
+
+void AppTabs::home() {
+    if (!mPoll.isActive()) return;
+    if (!mEpoch.isEmpty()) {
+        request("home", QJsonObject{{"slot", 0}});
+        return;
+    }
+    mDesktop->setChecked(true);
+    mDisplay->setTabInput(-1);
+    checkDesktopFocus(true);
+    mDesktopRetry.start();
+}
 
 void AppTabs::updateTabs(const QJsonArray& tabs) {
     showCloseButton(-1);
@@ -250,12 +342,11 @@ void AppTabs::receive() {
         mPendingSelect = -1;
         mEpoch.clear();
         mPresentation = {};
-        mDesktop->setEnabled(false);
-        mDesktop->setChecked(true);
         mBar->hide();
-        mActive = 0;
         mDisplay->setTabInput(-1);
-        mDisplay->showTabSurface(0, 0);
+        present(QJsonObject{{"slot", 0}});
+        checkDesktopFocus(false);
+        mDesktopRetry.start();
         return;
     }
     auto state = QJsonDocument::fromJson(QByteArray::fromStdString(*packet)).object();
@@ -263,6 +354,8 @@ void AppTabs::receive() {
     if (epoch.isEmpty() || !state.value("tabs").isArray()) return;
     const bool reconnect = epoch != mEpoch;
     if (reconnect) {
+        mDesktopRetry.stop();
+        cancelDesktopCheck();
         mEpoch = epoch;
         mSequence = 0;
     }
@@ -277,7 +370,6 @@ void AppTabs::receive() {
     state.remove("seq");
     if (!reconnect && state == mPresentation) return;
     mPresentation = state;
-    mDesktop->setEnabled(true);
     mBar->setVisible(!tabs.isEmpty());
     // Select against the new bar width, or Qt can scroll earlier tabs out of view.
     if (tabsChanged) mBar->parentWidget()->layout()->activate();
@@ -305,6 +397,8 @@ void AppTabs::layout() {
 
 void AppTabs::stop() {
     mPoll.stop();
+    mDesktopRetry.stop();
+    cancelDesktopCheck();
     mDisplay->setTabInput(-1);
     mActive = 0;
     mDisplay->showTabSurface(0, 0);

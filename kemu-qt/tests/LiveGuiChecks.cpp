@@ -22,6 +22,7 @@
 #include <QToolButton>
 #include <QXmlStreamReader>
 #include "android/emulation/KemuTabPipe.h"
+#include "android/skin/linux_keycodes.h"
 #include "android/skin/qt/emulator-container.h"
 #include "android/skin/qt/emulator-qt-window.h"
 #include "android/skin/qt/tool-window.h"
@@ -112,6 +113,7 @@ private:
         if (mFailed) return;
         if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_TAB_PEN") ||
             qEnvironmentVariableIsSet("KEMU_GUI_TEST_TAB_WHEEL")) { checkTabPointerInput(); return; }
+        if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_TAB_RECOVERY")) { checkTabRecovery(); return; }
         if (qEnvironmentVariableIsSet("KEMU_GUI_TEST_TAB_AUDIO")) { checkTabAudio(); return; }
         if (!mSwitchApp.isEmpty()) {
             checkTabSwitch();
@@ -585,6 +587,55 @@ private:
         mChecks.append("The selected app received the pen press and release on input target change");
         mTimer.stop();
         save();
+    }
+
+    void checkTabRecovery() {
+        mTimer.setInterval(300);
+        auto* bar = mRoot->findChild<QTabBar*>("KemuAppTabs");
+        auto* desktop = mRoot->findChild<QToolButton*>("KemuDesktopTab");
+        if (mElapsed.elapsed() > (mStage == 0 ? 180000 : 20000)) {
+            fail("Timed out checking desktop input recovery");
+            return;
+        }
+        if (!desktop || !bar) return;
+        const QString service = "com.android.emulator.multidisplay/.MultiDisplayService";
+        const QString probe = "org.kemu.tests.tabs.wide";
+        if (mStage == 0) {
+            if (!bar->isVisible() || desktop->isChecked()) return;
+            // ActivityManager prints this confirmation but exits nonzero for a successful stop.
+            adb({"shell", "am stopservice -n " + service + " 2>&1 | grep -Fx 'Service stopped'"});
+        } else if (mStage == 1) {
+            if (bar->isVisible() || !desktop->isChecked()) return;
+            if (!reachableDesktop(desktop)) { fail("Disconnected Home is disabled"); return; }
+            adb({"shell", "am", "start", "-W", "--display", "0", "-n", probe + "/org.kemu.tests.tabs.Probe"});
+        } else if (mStage == 2) {
+            const QString pid = adb({"shell", "pidof " + probe + " || true"}).trimmed();
+            if (pid.isEmpty()) return;
+            const auto logs = adb({"logcat", "-d", "--pid", pid, "-s", "KemuTabProbe:I"});
+            if (!logs.contains("key=66 action=1")) {
+                SkinEvent key{};
+                key.u.key.keycode = LINUX_KEY_ENTER;
+                key.type = kEventKeyDown;
+                mDisplay->queueSkinEvent(key);
+                key.type = kEventKeyUp;
+                mDisplay->queueSkinEvent(key);
+                return;
+            }
+            mChecks.append("A desktop activity received host keyboard input with the tab service stopped");
+            desktop->click();
+        } else if (mStage == 3) {
+            if (!adb({"shell", "dumpsys activity activities | grep topDisplayFocusedRootTask"}).contains("type=home")) return;
+            mChecks.append("Offline Home opened Launcher on the default display");
+            adb({"shell", "am", "startservice", "-n", service});
+        } else {
+            const QString dump = adb({"shell", "dumpsys", "activity", "service", service});
+            if (!dump.contains("\"active\":0") || !dump.contains("\"input\":0")) return;
+            mChecks.append("Reconnected with desktop focus and input");
+            mTimer.stop();
+            save();
+            return;
+        }
+        advance();
     }
 
     bool reachableDesktop(QToolButton* desktop) {
